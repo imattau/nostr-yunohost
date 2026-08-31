@@ -40,6 +40,8 @@ func run(args []string, out, errOut io.Writer) int {
 		return runCatalog(args[1:], out, errOut)
 	case "preview":
 		return runPreview(args[1:], out, errOut)
+	case "keygen":
+		return runKeygen(args[1:], out, errOut)
 	default:
 		fmt.Fprintf(errOut, "unknown command %q\n", args[0])
 		usage(errOut)
@@ -258,6 +260,45 @@ func runPreview(args []string, out, errOut io.Writer) int {
 	return 0
 }
 
+func runKeygen(args []string, out, errOut io.Writer) int {
+	flags := flag.NewFlagSet("keygen", flag.ContinueOnError)
+	flags.SetOutput(errOut)
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(errOut, "usage: nostr-ynh keygen")
+		return 2
+	}
+	privateKey := nostr.GeneratePrivateKey()
+	publicKey, err := nostr.GetPublicKey(privateKey)
+	if err != nil {
+		fmt.Fprintf(errOut, "derive public key: %v\n", err)
+		return 1
+	}
+	nsec, err := nip19.EncodePrivateKey(privateKey)
+	if err != nil {
+		fmt.Fprintf(errOut, "encode private key: %v\n", err)
+		return 1
+	}
+	npub, err := nip19.EncodePublicKey(publicKey)
+	if err != nil {
+		fmt.Fprintf(errOut, "encode public key: %v\n", err)
+		return 1
+	}
+	result := struct {
+		PrivateKeyHex string `json:"private_key_hex"`
+		Nsec          string `json:"nsec"`
+		PublicKeyHex  string `json:"public_key_hex"`
+		Npub          string `json:"npub"`
+	}{privateKey, nsec, publicKey, npub}
+	if err := json.NewEncoder(out).Encode(result); err != nil {
+		fmt.Fprintf(errOut, "write keys: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func splitNonEmpty(raw string) []string {
 	var values []string
 	for _, value := range strings.Split(raw, ",") {
@@ -275,4 +316,5 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "  nostr-ynh inspect [--relays <ws://...,...>] <naddr>")
 	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...>")
 	fmt.Fprintln(out, "  nostr-ynh preview [--ref <branch|tag|commit>] <repository-url>")
+	fmt.Fprintln(out, "  nostr-ynh keygen")
 }
