@@ -20,6 +20,8 @@ import (
 	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
 )
 
+var version = "dev"
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -28,6 +30,10 @@ func run(args []string, out, errOut io.Writer) int {
 	if len(args) == 0 {
 		usage(errOut)
 		return 2
+	}
+	if args[0] == "version" || args[0] == "--version" {
+		fmt.Fprintln(out, version)
+		return 0
 	}
 	switch args[0] {
 	case "verify":
@@ -338,4 +344,5 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...>")
 	fmt.Fprintln(out, "  nostr-ynh preview [--ref <branch|tag|commit>] <repository-url>")
 	fmt.Fprintln(out, "  nostr-ynh keygen")
+	fmt.Fprintln(out, "  nostr-ynh version")
 }

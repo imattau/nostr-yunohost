@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -18,7 +19,10 @@ import (
 	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
 )
 
+var version = "dev"
+
 func main() {
+	versionFlag := flag.Bool("version", false, "print version")
 	listen := flag.String("listen", "127.0.0.1:8090", "HTTP listen address")
 	cachePath := flag.String("cache", "catalogue-cache.json", "local catalogue cache path")
 	relayList := flag.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
@@ -26,6 +30,10 @@ func main() {
 	trustedCurators := flag.String("trusted-curators", os.Getenv("NOSTR_YNH_TRUSTED_CURATORS"), "comma-separated curator hex keys or npubs")
 	minimumEndorsements := flag.Int("minimum-endorsements", defaultMinimumEndorsements(), "minimum trusted endorsements for canonical selection")
 	flag.Parse()
+	if *versionFlag {
+		fmt.Println(version)
+		return
+	}
 	relays := splitNonEmpty(*relayList)
 	trustedPublishers := splitNonEmpty(*trustedList)
 	policy, err := trust.NewExplicitPublishers(trustedPublishers)

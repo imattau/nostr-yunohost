@@ -40,9 +40,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          ldflags="-s -w -X main.version=${version}"
           mkdir -p dist/${{ matrix.name }}
-          go build -trimpath -ldflags='-s -w' -o dist/${{ matrix.name }}/nostr-ynh ./cmd/nostr-ynh
-          go build -trimpath -ldflags='-s -w' -o dist/${{ matrix.name }}/nostr-catalogd ./cmd/nostr-catalogd
+          go build -trimpath -ldflags="$ldflags" -o dist/${{ matrix.name }}/nostr-ynh ./cmd/nostr-ynh
+          go build -trimpath -ldflags="$ldflags" -o dist/${{ matrix.name }}/nostr-catalogd ./cmd/nostr-catalogd
           tar -C dist/${{ matrix.name }} -czf dist/nostr-yunohost-${{ matrix.name }}.tar.gz nostr-ynh nostr-catalogd
 
       - uses: actions/upload-artifact@v4
