@@ -6,7 +6,8 @@ The project plan, architecture, MVP definition, roadmap, and security boundaries
 
 ## Status
 
-Planning / Phase 0.
+Phase 0 in progress: the event schema and structural parser are implemented;
+relay publishing and repository verification are next.
 
 ## Scope
 
