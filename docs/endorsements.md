@@ -16,7 +16,7 @@ The event contains:
 - `claim` — for example `recommend` or `tested`;
 - content — optional human-readable comment.
 
-No catalogue accepts endorsements automatically yet. A future trust policy can
-require one or more endorsements from configured curator identities and use
-that result to select a canonical app when multiple publishers use the same
-YunoHost app ID.
+The curation package now validates endorsements from configured curator
+identities and can select a unique canonical candidate once the endorsement
+threshold is met. Catalogue ingestion does not apply this policy automatically
+yet; daemon integration is the next step.
