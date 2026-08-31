@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/publisher"
 
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
@@ -30,6 +32,8 @@ func run(args []string, out, errOut io.Writer) int {
 		return runVerify(args[1:], out, errOut)
 	case "publish":
 		return runPublish(args[1:], out, errOut)
+	case "inspect":
+		return runInspect(args[1:], out, errOut)
 	default:
 		fmt.Fprintf(errOut, "unknown command %q\n", args[0])
 		usage(errOut)
@@ -124,6 +128,61 @@ func runPublish(args []string, out, errOut io.Writer) int {
 	return 0
 }
 
+func runInspect(args []string, out, errOut io.Writer) int {
+	flags := flag.NewFlagSet("inspect", flag.ContinueOnError)
+	flags.SetOutput(errOut)
+	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(errOut, "usage: nostr-ynh inspect [--relays <ws://...,...>] <naddr>")
+		return 2
+	}
+	prefix, value, err := nip19.Decode(flags.Arg(0))
+	if err != nil || prefix != "naddr" {
+		fmt.Fprintf(errOut, "decode naddr: %v\n", err)
+		return 1
+	}
+	pointer, ok := value.(nostr.EntityPointer)
+	if !ok || pointer.Kind != protocol.AppDeclarationKind {
+		fmt.Fprintln(errOut, "naddr does not point to a YunoHost app declaration")
+		return 1
+	}
+	relayURLs := splitNonEmpty(*relayList)
+	if len(relayURLs) == 0 {
+		relayURLs = pointer.Relays
+	}
+	client, err := relay.New(context.Background(), relayURLs)
+	if err != nil {
+		fmt.Fprintf(errOut, "configure relays: %v\n", err)
+		return 1
+	}
+	event, err := client.FetchReplaceable(context.Background(), pointer.PublicKey, pointer.Identifier)
+	if err != nil {
+		fmt.Fprintf(errOut, "fetch declaration: %v\n", err)
+		return 1
+	}
+	if err := protocol.VerifyID(*event); err != nil {
+		fmt.Fprintf(errOut, "invalid event ID: %v\n", err)
+		return 1
+	}
+	if err := protocol.VerifySignature(*event); err != nil {
+		fmt.Fprintf(errOut, "invalid signature: %v\n", err)
+		return 1
+	}
+	declaration, err := protocol.ParseAppDeclaration(*event)
+	if err != nil {
+		fmt.Fprintf(errOut, "invalid app declaration: %v\n", err)
+		return 1
+	}
+	if err := json.NewEncoder(out).Encode(declaration); err != nil {
+		fmt.Fprintf(errOut, "write declaration: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func splitNonEmpty(raw string) []string {
 	var values []string
 	for _, value := range strings.Split(raw, ",") {
@@ -138,4 +197,5 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "usage:")
 	fmt.Fprintln(out, "  nostr-ynh verify <event.json>")
 	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex> --relays <ws://...,...> [--repo <path>]")
+	fmt.Fprintln(out, "  nostr-ynh inspect [--relays <ws://...,...>] <naddr>")
 }

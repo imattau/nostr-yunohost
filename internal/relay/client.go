@@ -48,6 +48,21 @@ type PublishResult struct {
 	Error error
 }
 
+// FetchReplaceable retrieves the latest declaration for a publisher/app pair
+// using the SDK's replaceable-event handling.
+func (c *Client) FetchReplaceable(ctx context.Context, publisher, appID string) (*nostr.Event, error) {
+	results := c.pool.FetchManyReplaceable(ctx, c.urls, nostr.Filter{
+		Kinds:   []int{protocol.AppDeclarationKind},
+		Authors: []string{publisher},
+		Tags:    nostr.TagMap{"d": {appID}},
+	})
+	event, ok := results.Load(nostr.ReplaceableKey{PubKey: publisher, D: appID})
+	if !ok {
+		return nil, fmt.Errorf("app declaration not found")
+	}
+	return event, nil
+}
+
 // Publish sends an already signed event to every configured relay. A partial
 // failure is returned as per-relay results so callers can report propagation
 // without discarding successful publications.
