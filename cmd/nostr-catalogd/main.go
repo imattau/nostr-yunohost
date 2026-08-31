@@ -12,6 +12,7 @@ import (
 
 	"github.com/nostr-yunohost/nostr-yunohost/internal/catalog"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/relay"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/repository"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
 )
 
@@ -35,7 +36,7 @@ func main() {
 	store := catalog.NewStore(policy)
 	go func() {
 		for received := range client.SubscribeAppDeclarations(ctx) {
-			if err := store.Ingest(*received.Event); err != nil {
+			if err := store.IngestVerified(ctx, *received.Event, repository.VerifyDeclaration); err != nil {
 				log.Printf("reject event %s: %v", received.ID, err)
 			}
 		}

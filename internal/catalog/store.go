@@ -3,6 +3,7 @@
 package catalog
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -16,6 +17,7 @@ import (
 type record struct {
 	Declaration protocol.AppDeclaration
 	CreatedAt   nostr.Timestamp
+	Manifest    map[string]any
 }
 
 // Store keeps the latest accepted declaration for each publisher/app pair.
@@ -43,6 +45,30 @@ func (s *Store) Ingest(event nostr.Event) error {
 		return nil
 	}
 	s.entries[key] = record{Declaration: declaration, CreatedAt: event.CreatedAt}
+	return nil
+}
+
+// IngestVerified applies trust validation and then verifies the authoritative
+// repository before adding the declaration to the store.
+func (s *Store) IngestVerified(ctx context.Context, event nostr.Event, verify func(context.Context, protocol.AppDeclaration) (map[string]any, error)) error {
+	declaration, err := s.policy.Validate(event)
+	if err != nil {
+		return err
+	}
+	manifest, err := verify(ctx, declaration)
+	if err != nil {
+		return fmt.Errorf("verify repository: %w", err)
+	}
+	if _, err := Translate(declaration, manifest, int64(event.CreatedAt)); err != nil {
+		return fmt.Errorf("translate catalogue entry: %w", err)
+	}
+	key := declaration.Publisher + "\x00" + declaration.AppID
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if current, ok := s.entries[key]; ok && current.CreatedAt >= event.CreatedAt {
+		return nil
+	}
+	s.entries[key] = record{Declaration: declaration, CreatedAt: event.CreatedAt, Manifest: manifest}
 	return nil
 }
 

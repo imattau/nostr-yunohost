@@ -3,12 +3,14 @@
 package repository
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/publisher"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -65,6 +67,45 @@ func ReadMetadata(directory string) (publisher.Metadata, error) {
 	}, nil
 }
 
+// VerifyDeclaration fetches a declaration's repository at its exact commit,
+// verifies both advertised hashes, and returns the authoritative manifest.
+func VerifyDeclaration(ctx context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+	temporaryDirectory, err := os.MkdirTemp("", "nostr-ynh-repository-")
+	if err != nil {
+		return nil, fmt.Errorf("create repository workspace: %w", err)
+	}
+	defer os.RemoveAll(temporaryDirectory)
+	if _, err := gitCommandContext(ctx, temporaryDirectory, "clone", "--no-checkout", "--filter=blob:none", "--quiet", declaration.Repository, "."); err != nil {
+		return nil, fmt.Errorf("clone repository: %w", err)
+	}
+	if _, err := gitCommandContext(ctx, temporaryDirectory, "checkout", "--detach", "--quiet", declaration.Commit); err != nil {
+		return nil, fmt.Errorf("checkout declared commit: %w", err)
+	}
+	return verifyCheckedOutDirectory(ctx, temporaryDirectory, declaration)
+}
+
+func verifyCheckedOutDirectory(ctx context.Context, directory string, declaration protocol.AppDeclaration) (map[string]any, error) {
+	manifestBytes, err := os.ReadFile(filepath.Join(directory, "manifest.toml"))
+	if err != nil {
+		return nil, fmt.Errorf("read repository manifest: %w", err)
+	}
+	if publisher.HashBytes(manifestBytes) != declaration.ManifestHash {
+		return nil, fmt.Errorf("manifest hash does not match declaration")
+	}
+	archive, err := gitCommandContext(ctx, directory, "archive", "--format=tar", "HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("archive checked-out repository: %w", err)
+	}
+	if publisher.HashBytes(archive) != declaration.ContentHash {
+		return nil, fmt.Errorf("repository content hash does not match declaration")
+	}
+	var manifest map[string]any
+	if err := toml.Unmarshal(manifestBytes, &manifest); err != nil {
+		return nil, fmt.Errorf("parse repository manifest: %w", err)
+	}
+	return manifest, nil
+}
+
 func gitOutput(directory string, args ...string) (string, error) {
 	output, err := gitCommand(directory, args...)
 	return strings.TrimSpace(string(output)), err
@@ -72,6 +113,12 @@ func gitOutput(directory string, args ...string) (string, error) {
 
 func gitCommand(directory string, args ...string) ([]byte, error) {
 	command := exec.Command("git", args...)
+	command.Dir = directory
+	return command.Output()
+}
+
+func gitCommandContext(ctx context.Context, directory string, args ...string) ([]byte, error) {
+	command := exec.CommandContext(ctx, "git", args...)
 	command.Dir = directory
 	return command.Output()
 }
