@@ -49,6 +49,15 @@ func main() {
 	if err := store.Load(*cachePath); err != nil {
 		log.Printf("load catalogue cache: %v", err)
 	}
+	for _, event := range client.FetchAppDeclarations(ctx) {
+		if err := store.IngestVerified(ctx, *event, repository.VerifyDeclaration); err != nil {
+			log.Printf("reject event %s: %v", event.ID, err)
+			continue
+		}
+		if err := store.Save(*cachePath); err != nil {
+			log.Printf("save catalogue: %v", err)
+		}
+	}
 	go func() {
 		for received := range client.SubscribeAppDeclarations(ctx) {
 			if err := store.IngestVerified(ctx, *received.Event, repository.VerifyDeclaration); err != nil {
@@ -60,13 +69,15 @@ func main() {
 			}
 		}
 	}()
-	go func() {
-		for received := range client.SubscribeEndorsements(ctx) {
-			if err := store.IngestEndorsement(*received.Event); err != nil {
-				log.Printf("reject endorsement %s: %v", received.ID, err)
+	if len(splitNonEmpty(*trustedCurators)) > 0 {
+		go func() {
+			for received := range client.SubscribeEndorsements(ctx) {
+				if err := store.IngestEndorsement(*received.Event); err != nil {
+					log.Printf("reject endorsement %s: %v", received.ID, err)
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) {
