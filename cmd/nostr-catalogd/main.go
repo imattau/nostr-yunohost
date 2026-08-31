@@ -18,6 +18,7 @@ import (
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8090", "HTTP listen address")
+	cachePath := flag.String("cache", "catalogue-cache.json", "local catalogue cache path")
 	relayList := flag.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
 	trustedList := flag.String("trusted-publishers", os.Getenv("NOSTR_YNH_TRUSTED_PUBLISHERS"), "comma-separated publisher hex keys or npubs")
 	flag.Parse()
@@ -34,10 +35,17 @@ func main() {
 		log.Fatal(err)
 	}
 	store := catalog.NewStore(policy)
+	if err := store.Load(*cachePath); err != nil {
+		log.Printf("load catalogue cache: %v", err)
+	}
 	go func() {
 		for received := range client.SubscribeAppDeclarations(ctx) {
 			if err := store.IngestVerified(ctx, *received.Event, repository.VerifyDeclaration); err != nil {
 				log.Printf("reject event %s: %v", received.ID, err)
+				continue
+			}
+			if err := store.Save(*cachePath); err != nil {
+				log.Printf("save catalogue cache: %v", err)
 			}
 		}
 	}()

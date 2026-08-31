@@ -28,7 +28,10 @@ pinned commit first, then pass the parsed manifest to the translator.
 
 The generated response should be deterministic: stable ordering, stable JSON
 encoding, and no relay-specific data. The local cache remains usable while
-relays are unavailable.
+relays are unavailable. The current MVP cache is an atomically replaced JSON
+file containing accepted signed events and authoritative manifests; it is
+revalidated against the active trust policy at startup. SQLite can replace this
+storage when catalogue scale requires indexed queries.
 
 ## Local service contract
 

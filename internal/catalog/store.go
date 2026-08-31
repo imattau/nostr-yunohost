@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 
@@ -15,6 +17,7 @@ import (
 )
 
 type record struct {
+	Event       nostr.Event
 	Declaration protocol.AppDeclaration
 	CreatedAt   nostr.Timestamp
 	Manifest    map[string]any
@@ -44,7 +47,7 @@ func (s *Store) Ingest(event nostr.Event) error {
 	if current, ok := s.entries[key]; ok && current.CreatedAt >= event.CreatedAt {
 		return nil
 	}
-	s.entries[key] = record{Declaration: declaration, CreatedAt: event.CreatedAt}
+	s.entries[key] = record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt}
 	return nil
 }
 
@@ -68,7 +71,68 @@ func (s *Store) IngestVerified(ctx context.Context, event nostr.Event, verify fu
 	if current, ok := s.entries[key]; ok && current.CreatedAt >= event.CreatedAt {
 		return nil
 	}
-	s.entries[key] = record{Declaration: declaration, CreatedAt: event.CreatedAt, Manifest: manifest}
+	s.entries[key] = record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt, Manifest: manifest}
+	return nil
+}
+
+type cacheFile struct {
+	Entries []record `json:"entries"`
+}
+
+// Save persists accepted records to a local JSON cache. The write is atomic
+// within the target directory.
+func (s *Store) Save(path string) error {
+	s.mu.RLock()
+	entries := make([]record, 0, len(s.entries))
+	for _, entry := range s.entries {
+		entries = append(entries, entry)
+	}
+	s.mu.RUnlock()
+	data, err := json.Marshal(cacheFile{Entries: entries})
+	if err != nil {
+		return fmt.Errorf("encode catalogue cache: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("create cache directory: %w", err)
+	}
+	temporaryPath := path + ".tmp"
+	if err := os.WriteFile(temporaryPath, append(data, '\n'), 0o640); err != nil {
+		return fmt.Errorf("write catalogue cache: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("replace catalogue cache: %w", err)
+	}
+	return nil
+}
+
+// Load restores a cache and revalidates every stored event against the
+// current cryptographic and trust policy.
+func (s *Store) Load(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read catalogue cache: %w", err)
+	}
+	var cached cacheFile
+	if err := json.Unmarshal(data, &cached); err != nil {
+		return fmt.Errorf("decode catalogue cache: %w", err)
+	}
+	for _, entry := range cached.Entries {
+		declaration, err := s.policy.Validate(entry.Event)
+		if err != nil {
+			continue
+		}
+		if entry.Manifest == nil {
+			continue
+		}
+		if _, err := Translate(declaration, entry.Manifest, int64(entry.Event.CreatedAt)); err != nil {
+			continue
+		}
+		key := declaration.Publisher + "\x00" + declaration.AppID
+		s.entries[key] = record{Event: entry.Event, Declaration: declaration, CreatedAt: entry.Event.CreatedAt, Manifest: entry.Manifest}
+	}
 	return nil
 }
 
