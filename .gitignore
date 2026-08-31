@@ -1,0 +1,14 @@
+# Build output
+/bin/
+/dist/
+
+# Local catalogue state
+*.sqlite
+*.sqlite3
+*.db
+
+# Environment and editor files
+.env
+.DS_Store
+.idea/
+.vscode/
