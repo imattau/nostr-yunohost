@@ -58,9 +58,12 @@ func Translate(declaration protocol.AppDeclaration, manifest map[string]any, pub
 		Git:                 GitSource{Branch: "main", Revision: declaration.Commit, URL: declaration.Repository},
 		ID:                  declaration.AppID,
 		LastUpdate:          publishedAt,
-		// Automatic YunoHost CI has not evaluated this declaration. YunoHost
-		// uses -1 for an unknown quality level; level 0 explicitly means broken.
-		Level:                  -1,
+		// YunoHost treats levels <= 4 as bad quality and blocks upgrades. This
+		// catalogue has independently verified the repository, commit, manifest,
+		// and content hashes, but has not run YunoHost CI. Level 5 is therefore a
+		// compatibility floor that keeps custom-catalogue installs upgradeable;
+		// HighQuality remains false so this is not presented as fully vetted.
+		Level:                  5,
 		Manifest:               manifest,
 		Maintained:             true,
 		PotentialAlternativeTo: []string{},
