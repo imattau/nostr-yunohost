@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/nostr-yunohost/nostr-yunohost/internal/catalog"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/curation"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/relay"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/repository"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
@@ -21,6 +22,8 @@ func main() {
 	cachePath := flag.String("cache", "catalogue-cache.json", "local catalogue cache path")
 	relayList := flag.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
 	trustedList := flag.String("trusted-publishers", os.Getenv("NOSTR_YNH_TRUSTED_PUBLISHERS"), "comma-separated publisher hex keys or npubs")
+	trustedCurators := flag.String("trusted-curators", os.Getenv("NOSTR_YNH_TRUSTED_CURATORS"), "comma-separated curator hex keys or npubs")
+	minimumEndorsements := flag.Int("minimum-endorsements", 1, "minimum trusted endorsements for canonical selection")
 	flag.Parse()
 	relays := splitNonEmpty(*relayList)
 	trustedPublishers := splitNonEmpty(*trustedList)
@@ -35,6 +38,13 @@ func main() {
 		log.Fatal(err)
 	}
 	store := catalog.NewStore(policy)
+	if curatorKeys := splitNonEmpty(*trustedCurators); len(curatorKeys) > 0 {
+		curationPolicy, err := curation.NewPolicy(curatorKeys, *minimumEndorsements)
+		if err != nil {
+			log.Fatal(err)
+		}
+		store.SetCurationPolicy(curationPolicy)
+	}
 	if err := store.Load(*cachePath); err != nil {
 		log.Printf("load catalogue cache: %v", err)
 	}
@@ -46,6 +56,13 @@ func main() {
 			}
 			if err := store.Save(*cachePath); err != nil {
 				log.Printf("save catalogue cache: %v", err)
+			}
+		}
+	}()
+	go func() {
+		for received := range client.SubscribeEndorsements(ctx) {
+			if err := store.IngestEndorsement(*received.Event); err != nil {
+				log.Printf("reject endorsement %s: %v", received.ID, err)
 			}
 		}
 	}()

@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/curation"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
 )
@@ -25,9 +26,18 @@ type record struct {
 
 // Store keeps the latest accepted declaration for each publisher/app pair.
 type Store struct {
-	mu      sync.RWMutex
-	policy  trust.ExplicitPublishers
-	entries map[string]record
+	mu             sync.RWMutex
+	policy         trust.ExplicitPublishers
+	entries        map[string]record
+	curationPolicy *curation.Policy
+	endorsements   []curation.Endorsement
+}
+
+// SetCurationPolicy enables trusted-curator selection for duplicate app IDs.
+func (s *Store) SetCurationPolicy(policy curation.Policy) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.curationPolicy = &policy
 }
 
 func NewStore(policy trust.ExplicitPublishers) *Store {
@@ -72,6 +82,29 @@ func (s *Store) IngestVerified(ctx context.Context, event nostr.Event, verify fu
 		return nil
 	}
 	s.entries[key] = record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt, Manifest: manifest}
+	return nil
+}
+
+// IngestEndorsement validates and records a trusted curator endorsement.
+func (s *Store) IngestEndorsement(event nostr.Event) error {
+	s.mu.Lock()
+	policy := s.curationPolicy
+	s.mu.Unlock()
+	if policy == nil {
+		return fmt.Errorf("curation policy is not configured")
+	}
+	endorsement, err := policy.Accept(event)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.endorsements {
+		if existing.Curator == endorsement.Curator && existing.Publisher == endorsement.Publisher && existing.AppID == endorsement.AppID {
+			return nil
+		}
+	}
+	s.endorsements = append(s.endorsements, endorsement)
 	return nil
 }
 
@@ -161,28 +194,42 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 		Categories:   []any{},
 		Security:     []any{},
 	}
-	publishersByID := make(map[string]string)
-	collisions := make(map[string]struct{})
+	byAppID := make(map[string][]record)
 	for _, entry := range s.entries {
 		if entry.Manifest == nil {
 			continue
 		}
-		appID := entry.Declaration.AppID
-		if publisher, ok := publishersByID[appID]; ok && publisher != entry.Declaration.Publisher {
-			collisions[appID] = struct{}{}
-			delete(catalogue.Apps, appID)
-			continue
+		byAppID[entry.Declaration.AppID] = append(byAppID[entry.Declaration.AppID], entry)
+	}
+	for appID, candidates := range byAppID {
+		var selected record
+		if len(candidates) == 1 {
+			selected = candidates[0]
+		} else {
+			if s.curationPolicy == nil {
+				continue
+			}
+			declarations := make([]protocol.AppDeclaration, 0, len(candidates))
+			for _, candidate := range candidates {
+				declarations = append(declarations, candidate.Declaration)
+			}
+			declaration := s.curationPolicy.SelectCanonical(declarations, s.endorsements)
+			if declaration == nil {
+				continue
+			}
+			for _, candidate := range candidates {
+				if candidate.Declaration.Publisher == declaration.Publisher {
+					selected = candidate
+					break
+				}
+			}
 		}
-		publishersByID[appID] = entry.Declaration.Publisher
-		if _, collision := collisions[appID]; collision {
-			continue
-		}
-		app, err := Translate(entry.Declaration, entry.Manifest, int64(entry.CreatedAt))
+		app, err := Translate(selected.Declaration, selected.Manifest, int64(selected.CreatedAt))
 		if err != nil {
 			s.mu.RUnlock()
-			return fmt.Errorf("translate app %s: %w", entry.Declaration.AppID, err)
+			return fmt.Errorf("translate app %s: %w", appID, err)
 		}
-		catalogue.Apps[entry.Declaration.AppID] = app
+		catalogue.Apps[appID] = app
 	}
 	s.mu.RUnlock()
 	data, err := json.Marshal(catalogue)

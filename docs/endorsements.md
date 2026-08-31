@@ -16,7 +16,7 @@ The event contains:
 - `claim` — for example `recommend` or `tested`;
 - content — optional human-readable comment.
 
-The curation package now validates endorsements from configured curator
-identities and can select a unique canonical candidate once the endorsement
-threshold is met. Catalogue ingestion does not apply this policy automatically
-yet; daemon integration is the next step.
+The curation package validates endorsements from configured curator identities
+and can select a unique canonical candidate once the endorsement threshold is
+met. `nostr-catalogd` accepts `--trusted-curators` and
+`--minimum-endorsements` to enable this selection policy.

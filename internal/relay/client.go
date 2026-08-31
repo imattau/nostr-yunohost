@@ -97,3 +97,8 @@ func (c *Client) SubscribeAppDeclarations(ctx context.Context) <-chan nostr.Rela
 		Tags:  nostr.TagMap{"platform": {"yunohost"}},
 	})
 }
+
+// SubscribeEndorsements streams curator endorsement events from all relays.
+func (c *Client) SubscribeEndorsements(ctx context.Context) <-chan nostr.RelayEvent {
+	return c.pool.SubscribeMany(ctx, c.urls, nostr.Filter{Kinds: []int{30079}})
+}
