@@ -11,7 +11,15 @@ type YunoHostCatalog struct {
 	Antifeatures []any                  `json:"antifeatures"`
 	Apps         map[string]YunoHostApp `json:"apps"`
 	Categories   []any                  `json:"categories"`
-	Security     []any                  `json:"security"`
+	Security     SecurityIndex          `json:"security"`
+}
+
+// SecurityIndex is the versioned empty security index accepted by YunoHost.
+// Future Nostr security attestations can populate Apps and System.
+type SecurityIndex struct {
+	Version int              `json:"version"`
+	Apps    map[string][]any `json:"apps"`
+	System  map[string][]any `json:"system"`
 }
 
 type YunoHostApp struct {

@@ -192,7 +192,11 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 		Antifeatures: []any{},
 		Apps:         make(map[string]YunoHostApp),
 		Categories:   []any{},
-		Security:     []any{},
+		Security: SecurityIndex{
+			Version: 1,
+			Apps:    map[string][]any{},
+			System:  map[string][]any{},
+		},
 	}
 	byAppID := make(map[string][]record)
 	for _, entry := range s.entries {
