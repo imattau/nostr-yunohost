@@ -15,11 +15,16 @@ normalised internal catalogue entry
 YunoHost /v3/apps.json response
 ```
 
-The adapter should map the fields YunoHost currently requires, including the
-application ID, manifest/package metadata, Git source, category, level, and
-version information. Phase 0 must capture a fixture from the target YunoHost
-version and test this mapping against it rather than guessing the complete
-format.
+The current upstream shape is an object containing `antifeatures`, `apps`,
+`categories`, and `security`. `apps` is keyed by app ID. Each app entry
+contains, among other fields, `id`, `git.url`, `git.branch`, `git.revision`,
+`manifest`, `category`, `state`, `level`, `maintained`, `added_in_catalog`, and
+`lastUpdate`. The translator in `internal/catalog/yunohost.go` is fixture-ready
+for this shape.
+
+The daemon must not synthesize the authoritative `manifest` from Nostr hints.
+It must fetch and validate `manifest.toml` from the declared repository and
+pinned commit first, then pass the parsed manifest to the translator.
 
 The generated response should be deterministic: stable ordering, stable JSON
 encoding, and no relay-specific data. The local cache remains usable while
