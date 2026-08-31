@@ -11,10 +11,11 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/publisher"
 
 	"github.com/nostr-yunohost/nostr-yunohost/internal/catalog"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/curation"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/publisher"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/relay"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/repository"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
@@ -42,6 +43,8 @@ func run(args []string, out, errOut io.Writer) int {
 		return runPublish(args[1:], out, errOut)
 	case "inspect":
 		return runInspect(args[1:], out, errOut)
+	case "endorse":
+		return runEndorse(args[1:], out, errOut)
 	case "catalog":
 		return runCatalog(args[1:], out, errOut)
 	case "preview":
@@ -233,6 +236,88 @@ func runInspect(args []string, out, errOut io.Writer) int {
 	return 0
 }
 
+func runEndorse(args []string, out, errOut io.Writer) int {
+	flags := flag.NewFlagSet("endorse", flag.ContinueOnError)
+	flags.SetOutput(errOut)
+	claim := flags.String("claim", "recommend", "curation claim: recommend or tested")
+	comment := flags.String("comment", "", "optional curator comment")
+	privateKey := flags.String("private-key", os.Getenv("NOSTR_YNH_PRIVATE_KEY"), "curator private key")
+	privateKeyFile := flags.String("private-key-file", "", "file containing the curator private key")
+	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(errOut, "usage: nostr-ynh endorse [--claim recommend|tested] [--comment <text>] [--private-key <hex>|--private-key-file <path>] [--relays <ws://...,...>] <naddr>")
+		return 2
+	}
+	if *privateKeyFile != "" {
+		if *privateKey != "" {
+			fmt.Fprintln(errOut, "use only one of --private-key, --private-key-file, or NOSTR_YNH_PRIVATE_KEY")
+			return 2
+		}
+		data, err := os.ReadFile(*privateKeyFile)
+		if err != nil {
+			fmt.Fprintf(errOut, "read private key file: %v\n", err)
+			return 1
+		}
+		*privateKey = strings.TrimSpace(string(data))
+	}
+	if *privateKey == "" {
+		fmt.Fprintln(errOut, "endorse requires --private-key (or --private-key-file/NOSTR_YNH_PRIVATE_KEY)")
+		return 2
+	}
+	prefix, value, err := nip19.Decode(flags.Arg(0))
+	if err != nil || prefix != "naddr" {
+		fmt.Fprintf(errOut, "decode naddr: %v\n", err)
+		return 1
+	}
+	pointer, ok := value.(nostr.EntityPointer)
+	if !ok || pointer.Kind != protocol.AppDeclarationKind {
+		fmt.Fprintln(errOut, "naddr does not point to a YunoHost app declaration")
+		return 1
+	}
+	if *claim != "recommend" && *claim != "tested" {
+		fmt.Fprintln(errOut, "claim must be recommend or tested")
+		return 2
+	}
+	endorsement, err := curation.Build(pointer.PublicKey, pointer.Identifier, *claim, *comment, *privateKey)
+	if err != nil {
+		fmt.Fprintf(errOut, "build endorsement: %v\n", err)
+		return 1
+	}
+	relayURLs := splitNonEmpty(*relayList)
+	if len(relayURLs) == 0 {
+		relayURLs = pointer.Relays
+	}
+	if len(relayURLs) == 0 {
+		fmt.Fprintln(errOut, "endorse requires --relays (or relay hints in the naddr)")
+		return 2
+	}
+	client, err := relay.New(context.Background(), relayURLs)
+	if err != nil {
+		fmt.Fprintf(errOut, "configure relays: %v\n", err)
+		return 1
+	}
+	if err := json.NewEncoder(out).Encode(endorsement); err != nil {
+		fmt.Fprintf(errOut, "write event: %v\n", err)
+		return 1
+	}
+	succeeded := 0
+	for _, result := range client.Publish(context.Background(), endorsement) {
+		if result.Error != nil {
+			fmt.Fprintf(errOut, "%s: %v\n", result.Relay, result.Error)
+			continue
+		}
+		succeeded++
+		fmt.Fprintf(errOut, "%s: published\n", result.Relay)
+	}
+	if succeeded == 0 {
+		return 1
+	}
+	return 0
+}
+
 func runCatalog(args []string, out, errOut io.Writer) int {
 	flags := flag.NewFlagSet("catalog", flag.ContinueOnError)
 	flags.SetOutput(errOut)
@@ -341,6 +426,7 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "  nostr-ynh verify <event.json>")
 	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex>|--private-key-file <path> --relays <ws://...,...> [--repo <path>|--repository-url <url> --ref <ref>] [--dry-run]")
 	fmt.Fprintln(out, "  nostr-ynh inspect [--relays <ws://...,...>] <naddr>")
+	fmt.Fprintln(out, "  nostr-ynh endorse [--claim recommend|tested] [--comment <text>] [--private-key <hex>|--private-key-file <path>] [--relays <ws://...,...>] <naddr>")
 	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...>")
 	fmt.Fprintln(out, "  nostr-ynh preview [--ref <branch|tag|commit>] <repository-url>")
 	fmt.Fprintln(out, "  nostr-ynh keygen")
