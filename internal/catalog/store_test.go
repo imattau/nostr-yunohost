@@ -90,6 +90,34 @@ func TestStoreCacheRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWriteSnapshotOmitsPublisherCollision(t *testing.T) {
+	first := signedEvent(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "same_app")
+	second := signedEvent(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "same_app")
+	firstPublisher, _ := nostr.GetPublicKey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	secondPublisher, _ := nostr.GetPublicKey("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	policy, err := trust.NewExplicitPublishers([]string{firstPublisher, secondPublisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), first, verify); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IngestVerified(context.Background(), second, verify); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := store.WriteSnapshot(&output); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(output.Bytes(), []byte(`"same_app"`)) {
+		t.Fatalf("snapshot included an ambiguous app: %s", output.String())
+	}
+}
+
 func signedEvent(t *testing.T, privateKey, appID string) nostr.Event {
 	t.Helper()
 	publicKey, err := nostr.GetPublicKey(privateKey)

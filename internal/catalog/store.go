@@ -161,8 +161,20 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 		Categories:   []any{},
 		Security:     []any{},
 	}
+	publishersByID := make(map[string]string)
+	collisions := make(map[string]struct{})
 	for _, entry := range s.entries {
 		if entry.Manifest == nil {
+			continue
+		}
+		appID := entry.Declaration.AppID
+		if publisher, ok := publishersByID[appID]; ok && publisher != entry.Declaration.Publisher {
+			collisions[appID] = struct{}{}
+			delete(catalogue.Apps, appID)
+			continue
+		}
+		publishersByID[appID] = entry.Declaration.Publisher
+		if _, collision := collisions[appID]; collision {
 			continue
 		}
 		app, err := Translate(entry.Declaration, entry.Manifest, int64(entry.CreatedAt))

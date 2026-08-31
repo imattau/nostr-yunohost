@@ -22,6 +22,10 @@ contains, among other fields, `id`, `git.url`, `git.branch`, `git.revision`,
 `lastUpdate`. The translator in `internal/catalog/yunohost.go` is fixture-ready
 for this shape.
 
+Because YunoHost keys `apps` by app ID, entries from different publishers that
+share an app ID are treated as ambiguous and omitted until a curator/canonical
+selection policy exists. They must never be silently overwritten.
+
 The daemon must not synthesize the authoritative `manifest` from Nostr hints.
 It must fetch and validate `manifest.toml` from the declared repository and
 pinned commit first, then pass the parsed manifest to the translator.
