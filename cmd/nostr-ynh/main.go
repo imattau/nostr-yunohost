@@ -91,11 +91,12 @@ func runPublish(args []string, out, errOut io.Writer) int {
 	repositoryPath := flags.String("repo", ".", "YunoHost package repository")
 	privateKey := flags.String("private-key", os.Getenv("NOSTR_YNH_PRIVATE_KEY"), "Nostr publishing private key")
 	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
+	dryRun := flags.Bool("dry-run", false, "build and sign the event without publishing")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	if *privateKey == "" || *relayList == "" {
-		fmt.Fprintln(errOut, "publish requires --private-key (or NOSTR_YNH_PRIVATE_KEY) and --relays (or NOSTR_YNH_RELAYS)")
+	if *privateKey == "" || (!*dryRun && *relayList == "") {
+		fmt.Fprintln(errOut, "publish requires --private-key (or NOSTR_YNH_PRIVATE_KEY) and --relays (or NOSTR_YNH_RELAYS), unless --dry-run is used")
 		return 2
 	}
 	relayURLs := splitNonEmpty(*relayList)
@@ -113,6 +114,14 @@ func runPublish(args []string, out, errOut io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(errOut, "encode app address: %v\n", err)
 		return 1
+	}
+	if *dryRun {
+		if err := json.NewEncoder(out).Encode(event); err != nil {
+			fmt.Fprintf(errOut, "write event: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(errOut, "naddr: %s\n", address)
+		return 0
 	}
 	client, err := relay.New(context.Background(), relayURLs)
 	if err != nil {
@@ -262,7 +271,7 @@ func splitNonEmpty(raw string) []string {
 func usage(out io.Writer) {
 	fmt.Fprintln(out, "usage:")
 	fmt.Fprintln(out, "  nostr-ynh verify <event.json>")
-	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex> --relays <ws://...,...> [--repo <path>]")
+	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex> --relays <ws://...,...> [--repo <path>] [--dry-run]")
 	fmt.Fprintln(out, "  nostr-ynh inspect [--relays <ws://...,...>] <naddr>")
 	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...>")
 	fmt.Fprintln(out, "  nostr-ynh preview [--ref <branch|tag|commit>] <repository-url>")

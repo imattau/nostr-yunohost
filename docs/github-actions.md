@@ -40,6 +40,9 @@ Nostr key. Store it as a masked repository or environment secret. GitHub Actions
 publishing should be restricted to trusted branches/tags and protected release
 environments where practical.
 
+For a UI confirmation flow, `nostr-ynh publish --dry-run` builds and signs the
+event, outputs its JSON and `naddr`, and makes no relay connection.
+
 The action currently defaults to `main` because this project has not released a
 versioned binary yet. Once releases exist, workflows should pin
 `nostr-yunohost-version` to a release tag or immutable commit.
