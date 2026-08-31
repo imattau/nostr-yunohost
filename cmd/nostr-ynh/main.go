@@ -38,6 +38,8 @@ func run(args []string, out, errOut io.Writer) int {
 		return runInspect(args[1:], out, errOut)
 	case "catalog":
 		return runCatalog(args[1:], out, errOut)
+	case "preview":
+		return runPreview(args[1:], out, errOut)
 	default:
 		fmt.Fprintf(errOut, "unknown command %q\n", args[0])
 		usage(errOut)
@@ -224,6 +226,29 @@ func runCatalog(args []string, out, errOut io.Writer) int {
 	return 0
 }
 
+func runPreview(args []string, out, errOut io.Writer) int {
+	flags := flag.NewFlagSet("preview", flag.ContinueOnError)
+	flags.SetOutput(errOut)
+	revision := flags.String("ref", "", "branch, tag, or commit to inspect")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(errOut, "usage: nostr-ynh preview [--ref <branch|tag|commit>] <repository-url>")
+		return 2
+	}
+	metadata, err := repository.ReadRemoteMetadata(context.Background(), flags.Arg(0), *revision)
+	if err != nil {
+		fmt.Fprintf(errOut, "preview repository: %v\n", err)
+		return 1
+	}
+	if err := json.NewEncoder(out).Encode(metadata); err != nil {
+		fmt.Fprintf(errOut, "write metadata: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func splitNonEmpty(raw string) []string {
 	var values []string
 	for _, value := range strings.Split(raw, ",") {
@@ -240,4 +265,5 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex> --relays <ws://...,...> [--repo <path>]")
 	fmt.Fprintln(out, "  nostr-ynh inspect [--relays <ws://...,...>] <naddr>")
 	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...>")
+	fmt.Fprintln(out, "  nostr-ynh preview [--ref <branch|tag|commit>] <repository-url>")
 }

@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,5 +41,12 @@ func TestReadMetadata(t *testing.T) {
 	}
 	if metadata.ManifestHash != publisher.HashBytes([]byte("id = \"hello_nostr\"\nversion = \"1.0.0~ynh1\"\nname = \"Hello Nostr\"\ncategory = \"test\"\n")) {
 		t.Fatalf("manifest hash was not calculated from manifest.toml")
+	}
+	preview, err := ReadRemoteMetadata(context.Background(), directory, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Commit != metadata.Commit || preview.AppID != metadata.AppID {
+		t.Fatalf("unexpected preview metadata: %+v", preview)
 	}
 }

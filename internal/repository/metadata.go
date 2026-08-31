@@ -84,6 +84,25 @@ func VerifyDeclaration(ctx context.Context, declaration protocol.AppDeclaration)
 	return verifyCheckedOutDirectory(ctx, temporaryDirectory, declaration)
 }
 
+// ReadRemoteMetadata previews a remote package at a branch, tag, or commit
+// without signing or publishing anything.
+func ReadRemoteMetadata(ctx context.Context, repositoryURL, revision string) (publisher.Metadata, error) {
+	temporaryDirectory, err := os.MkdirTemp("", "nostr-ynh-preview-")
+	if err != nil {
+		return publisher.Metadata{}, fmt.Errorf("create preview workspace: %w", err)
+	}
+	defer os.RemoveAll(temporaryDirectory)
+	cloneArgs := []string{"clone", "--quiet", "--filter=blob:none"}
+	if revision != "" {
+		cloneArgs = append(cloneArgs, "--branch", revision)
+	}
+	cloneArgs = append(cloneArgs, repositoryURL, temporaryDirectory)
+	if _, err := gitCommandContext(ctx, "", cloneArgs...); err != nil {
+		return publisher.Metadata{}, fmt.Errorf("clone repository: %w", err)
+	}
+	return ReadMetadata(temporaryDirectory)
+}
+
 func verifyCheckedOutDirectory(ctx context.Context, directory string, declaration protocol.AppDeclaration) (map[string]any, error) {
 	manifestBytes, err := os.ReadFile(filepath.Join(directory, "manifest.toml"))
 	if err != nil {
