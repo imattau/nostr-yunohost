@@ -88,11 +88,28 @@ func (s *Store) Snapshot() []protocol.AppDeclaration {
 	return declarations
 }
 
-// WriteSnapshot writes the current intermediate catalogue representation.
-// The final YunoHost field mapping belongs in a separate adapter once a
-// target-version /v3/apps.json fixture is available.
+// WriteSnapshot writes the current YunoHost v3 catalogue representation.
 func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) error {
-	data, err := json.Marshal(s.Snapshot())
+	s.mu.RLock()
+	catalogue := YunoHostCatalog{
+		Antifeatures: []any{},
+		Apps:         make(map[string]YunoHostApp),
+		Categories:   []any{},
+		Security:     []any{},
+	}
+	for _, entry := range s.entries {
+		if entry.Manifest == nil {
+			continue
+		}
+		app, err := Translate(entry.Declaration, entry.Manifest, int64(entry.CreatedAt))
+		if err != nil {
+			s.mu.RUnlock()
+			return fmt.Errorf("translate app %s: %w", entry.Declaration.AppID, err)
+		}
+		catalogue.Apps[entry.Declaration.AppID] = app
+	}
+	s.mu.RUnlock()
+	data, err := json.Marshal(catalogue)
 	if err != nil {
 		return fmt.Errorf("encode catalogue snapshot: %w", err)
 	}

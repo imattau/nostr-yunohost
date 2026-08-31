@@ -2,9 +2,11 @@ package catalog
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
 )
 
@@ -34,6 +36,29 @@ func TestStoreIngestsAndOrdersDeclarations(t *testing.T) {
 	}
 	if output.Len() == 0 {
 		t.Fatal("snapshot was empty")
+	}
+}
+
+func TestWriteSnapshotIncludesVerifiedApps(t *testing.T) {
+	event := signedEvent(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "hello_nostr")
+	publicKey, _ := nostr.GetPublicKey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	policy, err := trust.NewExplicitPublishers([]string{publicKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := store.WriteSnapshot(&output); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(output.Bytes(), []byte(`"apps":{"hello_nostr"`)) {
+		t.Fatalf("snapshot did not contain keyed app: %s", output.String())
 	}
 }
 
