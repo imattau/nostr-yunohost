@@ -13,9 +13,11 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/publisher"
 
+	"github.com/nostr-yunohost/nostr-yunohost/internal/catalog"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/relay"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/repository"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
 )
 
 func main() {
@@ -34,6 +36,8 @@ func run(args []string, out, errOut io.Writer) int {
 		return runPublish(args[1:], out, errOut)
 	case "inspect":
 		return runInspect(args[1:], out, errOut)
+	case "catalog":
+		return runCatalog(args[1:], out, errOut)
 	default:
 		fmt.Fprintf(errOut, "unknown command %q\n", args[0])
 		usage(errOut)
@@ -183,6 +187,37 @@ func runInspect(args []string, out, errOut io.Writer) int {
 	return 0
 }
 
+func runCatalog(args []string, out, errOut io.Writer) int {
+	flags := flag.NewFlagSet("catalog", flag.ContinueOnError)
+	flags.SetOutput(errOut)
+	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
+	trustedList := flags.String("trusted-publishers", os.Getenv("NOSTR_YNH_TRUSTED_PUBLISHERS"), "comma-separated publisher hex keys or npubs")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	policy, err := trust.NewExplicitPublishers(splitNonEmpty(*trustedList))
+	if err != nil {
+		fmt.Fprintf(errOut, "configure trust policy: %v\n", err)
+		return 1
+	}
+	client, err := relay.New(context.Background(), splitNonEmpty(*relayList))
+	if err != nil {
+		fmt.Fprintf(errOut, "configure relays: %v\n", err)
+		return 1
+	}
+	store := catalog.NewStore(policy)
+	for _, event := range client.FetchAppDeclarations(context.Background()) {
+		if err := store.IngestVerified(context.Background(), *event, repository.VerifyDeclaration); err != nil {
+			fmt.Fprintf(errOut, "reject %s: %v\n", event.ID, err)
+		}
+	}
+	if err := store.WriteSnapshot(out); err != nil {
+		fmt.Fprintf(errOut, "write catalogue: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func splitNonEmpty(raw string) []string {
 	var values []string
 	for _, value := range strings.Split(raw, ",") {
@@ -198,4 +233,5 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "  nostr-ynh verify <event.json>")
 	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex> --relays <ws://...,...> [--repo <path>]")
 	fmt.Fprintln(out, "  nostr-ynh inspect [--relays <ws://...,...>] <naddr>")
+	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...>")
 }

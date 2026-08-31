@@ -63,6 +63,20 @@ func (c *Client) FetchReplaceable(ctx context.Context, publisher, appID string) 
 	return event, nil
 }
 
+// FetchAppDeclarations fetches the latest declaration per publisher/app pair.
+func (c *Client) FetchAppDeclarations(ctx context.Context) []*nostr.Event {
+	results := c.pool.FetchManyReplaceable(ctx, c.urls, nostr.Filter{
+		Kinds: []int{protocol.AppDeclarationKind},
+		Tags:  nostr.TagMap{"platform": {"yunohost"}},
+	})
+	events := make([]*nostr.Event, 0)
+	results.Range(func(_ nostr.ReplaceableKey, event *nostr.Event) bool {
+		events = append(events, event)
+		return true
+	})
+	return events
+}
+
 // Publish sends an already signed event to every configured relay. A partial
 // failure is returned as per-relay results so callers can report propagation
 // without discarding successful publications.
