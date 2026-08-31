@@ -15,6 +15,10 @@ The wrapper should render `NOSTR_YNH_RELAYS` and
 The initial service template is in
 `packaging/nostr_catalog_ynh/nostr-catalogd.service`.
 
+Tagged core releases build Linux binaries for amd64, arm64, and armv7 through
+`.github/workflows/release.yml`. The wrapper should pin one of these release
+archives by version and checksum rather than compiling on the YunoHost server.
+
 The custom YunoHost catalogue registration belongs in the wrapper's install
 and remove scripts. The catalogue URL must point to the local daemon and the
 daemon must remain bound to loopback unless an administrator explicitly

@@ -1,0 +1,65 @@
+name: Release binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            name: linux-amd64
+          - goos: linux
+            goarch: arm64
+            name: linux-arm64
+          - goos: linux
+            goarch: arm
+            goarm: '7'
+            name: linux-armv7
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Build binaries
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/${{ matrix.name }}
+          go build -trimpath -ldflags='-s -w' -o dist/${{ matrix.name }}/nostr-ynh ./cmd/nostr-ynh
+          go build -trimpath -ldflags='-s -w' -o dist/${{ matrix.name }}/nostr-catalogd ./cmd/nostr-catalogd
+          tar -C dist/${{ matrix.name }} -czf dist/nostr-yunohost-${{ matrix.name }}.tar.gz nostr-ynh nostr-catalogd
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nostr-yunohost-${{ matrix.name }}
+          path: dist/nostr-yunohost-${{ matrix.name }}.tar.gz
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: nostr-yunohost-*
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
