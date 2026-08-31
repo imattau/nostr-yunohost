@@ -36,6 +36,7 @@ type AppDeclaration struct {
 var (
 	appIDPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 	hex64Pattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	hex128Pattern = regexp.MustCompile(`^[0-9a-f]{128}$`)
 	commitPattern = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
 )
 
@@ -52,8 +53,8 @@ func ParseAppDeclaration(event Event) (AppDeclaration, error) {
 	if !hex64Pattern.MatchString(event.PubKey) {
 		return AppDeclaration{}, fmt.Errorf("pubkey must be 64 lowercase hexadecimal characters")
 	}
-	if !hex64Pattern.MatchString(event.ID) || !hex64Pattern.MatchString(event.Sig) {
-		return AppDeclaration{}, fmt.Errorf("id and sig must be 64 lowercase hexadecimal characters")
+	if !hex64Pattern.MatchString(event.ID) || !hex128Pattern.MatchString(event.Sig) {
+		return AppDeclaration{}, fmt.Errorf("id must be 64 and sig must be 128 lowercase hexadecimal characters")
 	}
 
 	tags, err := parseTags(event.Tags)

@@ -22,7 +22,7 @@ func validEvent() Event {
 			{"content", "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
 		},
 		Content: `{"name":"Hello Nostr","architectures":["amd64"]}`,
-		Sig:     "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		Sig:     "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
 	}
 }
 
