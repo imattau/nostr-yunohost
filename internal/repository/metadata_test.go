@@ -11,7 +11,8 @@ import (
 
 func TestReadMetadata(t *testing.T) {
 	directory := t.TempDir()
-	if err := os.WriteFile(filepath.Join(directory, "manifest.toml"), []byte("id = \"hello_nostr\"\nversion = \"1.0.0~ynh1\"\nname = \"Hello Nostr\"\ncategory = \"test\"\n"), 0o644); err != nil {
+	manifest := "id = \"hello_nostr\"\nversion = \"1.0.0~ynh1\"\nname = \"Hello Nostr\"\ndescription.en = \"A test app\"\ncategory = \"test\"\n\n[integration]\narchitectures = [\"amd64\", \"arm64\"]\n"
+	if err := os.WriteFile(filepath.Join(directory, "manifest.toml"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := gitCommand(directory, "init"); err != nil {
@@ -36,10 +37,13 @@ func TestReadMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metadata.AppID != "hello_nostr" || metadata.Version != "1.0.0~ynh1" || metadata.Category != "test" {
+	if metadata.AppID != "hello_nostr" || metadata.Version != "1.0.0~ynh1" || metadata.Category != "test" || metadata.Description != "A test app" {
 		t.Fatalf("unexpected metadata: %+v", metadata)
 	}
-	if metadata.ManifestHash != publisher.HashBytes([]byte("id = \"hello_nostr\"\nversion = \"1.0.0~ynh1\"\nname = \"Hello Nostr\"\ncategory = \"test\"\n")) {
+	if len(metadata.Architectures) != 2 || metadata.Architectures[0] != "amd64" || metadata.Architectures[1] != "arm64" {
+		t.Fatalf("unexpected architectures: %+v", metadata.Architectures)
+	}
+	if metadata.ManifestHash != publisher.HashBytes([]byte(manifest)) {
 		t.Fatalf("manifest hash was not calculated from manifest.toml")
 	}
 	preview, err := ReadRemoteMetadata(context.Background(), directory, "")

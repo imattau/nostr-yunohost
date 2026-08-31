@@ -16,12 +16,12 @@ import (
 )
 
 type manifest struct {
-	ID            string   `toml:"id"`
-	Version       string   `toml:"version"`
-	Name          string   `toml:"name"`
-	Description   string   `toml:"description"`
-	Category      string   `toml:"category"`
-	Architectures []string `toml:"architectures"`
+	ID            string
+	Version       string
+	Name          string
+	Description   string
+	Category      string
+	Architectures []string
 }
 
 // ReadMetadata reads manifest.toml and Git metadata from a package directory.
@@ -34,8 +34,8 @@ func ReadMetadata(directory string) (publisher.Metadata, error) {
 	if err != nil {
 		return publisher.Metadata{}, fmt.Errorf("read manifest.toml: %w", err)
 	}
-	var parsed manifest
-	if err := toml.Unmarshal(manifestBytes, &parsed); err != nil {
+	parsed, err := parseManifest(manifestBytes)
+	if err != nil {
 		return publisher.Metadata{}, fmt.Errorf("parse manifest.toml: %w", err)
 	}
 	if parsed.ID == "" || parsed.Version == "" {
@@ -65,6 +65,60 @@ func ReadMetadata(directory string) (publisher.Metadata, error) {
 		Description:   parsed.Description,
 		Architectures: parsed.Architectures,
 	}, nil
+}
+
+func parseManifest(data []byte) (manifest, error) {
+	var values map[string]any
+	if err := toml.Unmarshal(data, &values); err != nil {
+		return manifest{}, err
+	}
+	integration, _ := values["integration"].(map[string]any)
+	return manifest{
+		ID:            stringValue(values["id"]),
+		Version:       stringValue(values["version"]),
+		Name:          localizedValue(values["name"]),
+		Description:   localizedValue(values["description"]),
+		Category:      stringValue(values["category"]),
+		Architectures: stringSlice(integration["architectures"]),
+	}, nil
+}
+
+func localizedValue(value any) string {
+	if text := stringValue(value); text != "" {
+		return text
+	}
+	translations, ok := value.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if english := stringValue(translations["en"]); english != "" {
+		return english
+	}
+	for _, candidate := range translations {
+		if text := stringValue(candidate); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func stringSlice(value any) []string {
+	values, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if text := stringValue(value); text != "" {
+			result = append(result, text)
+		}
+	}
+	return result
 }
 
 // VerifyDeclaration fetches a declaration's repository at its exact commit,
