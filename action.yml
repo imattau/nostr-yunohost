@@ -1,0 +1,33 @@
+name: Publish YunoHost app to Nostr
+description: Sign and publish a YunoHost package declaration to Nostr relays
+inputs:
+  relays:
+    description: Comma-separated Nostr relay URLs
+    required: true
+  private-key:
+    description: Dedicated Nostr publishing key (hex)
+    required: true
+  repository:
+    description: Package repository path
+    required: false
+    default: .
+  nostr-yunohost-version:
+    description: nostr-yunohost module version or Git ref to install
+    required: false
+    default: main
+runs:
+  using: composite
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24'
+    - name: Publish signed declaration
+      shell: bash
+      env:
+        NOSTR_YNH_PRIVATE_KEY: ${{ inputs.private-key }}
+        NOSTR_YNH_RELAYS: ${{ inputs.relays }}
+      run: |
+        set -euo pipefail
+        go install "github.com/nostr-yunohost/nostr-yunohost/cmd/nostr-ynh@${{ inputs.nostr-yunohost-version }}"
+        "$(go env GOPATH)/bin/nostr-ynh" publish --repo "${{ inputs.repository }}"
