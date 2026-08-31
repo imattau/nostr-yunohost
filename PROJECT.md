@@ -170,6 +170,7 @@ Shared primitives with `npack` should be identified after the YunoHost implement
 - Implement `publish`, `inspect`, and `verify`.
 - Support `manifest.toml`, Git repositories, Nostr signing, and multiple relays.
 - Add fixtures and protocol tests.
+- Add GitHub Actions publishing and continuous integration workflows.
 
 ### Phase 2 — catalogue daemon
 
