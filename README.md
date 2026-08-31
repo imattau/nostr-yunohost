@@ -6,6 +6,8 @@ The project plan, architecture, MVP definition, roadmap, and security boundaries
 
 Publisher automation is documented in [docs/github-actions.md](docs/github-actions.md).
 
+The planned YunoHost wrapper contract is documented in [docs/yunohost-wrapper.md](docs/yunohost-wrapper.md).
+
 ## Status
 
 Phase 0 in progress: the event schema and structural parser are implemented;
