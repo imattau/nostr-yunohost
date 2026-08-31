@@ -2,6 +2,7 @@
 package protocol
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -45,8 +46,8 @@ var (
 )
 
 // ParseAppDeclaration validates the event envelope and extracts the app
-// declaration. Cryptographic ID/signature verification is deliberately kept
-// separate because it requires the selected Nostr crypto implementation.
+// declaration. Signature verification is deliberately kept separate because
+// it requires the selected Nostr crypto implementation.
 func ParseAppDeclaration(event Event) (AppDeclaration, error) {
 	if event.Kind != AppDeclarationKind {
 		return AppDeclaration{}, fmt.Errorf("unexpected event kind %d", event.Kind)
@@ -109,6 +110,22 @@ func ParseAppDeclaration(event Event) (AppDeclaration, error) {
 		declaration.Architectures = metadata.Architectures
 	}
 	return declaration, nil
+}
+
+// VerifyID checks the event ID against Nostr's canonical event serialization.
+// It does not verify the Schnorr signature; callers must perform that check
+// with a secp256k1 implementation before trusting the event.
+func VerifyID(event Event) error {
+	serialized, err := json.Marshal([]any{0, event.PubKey, event.CreatedAt, event.Kind, event.Tags, event.Content})
+	if err != nil {
+		return fmt.Errorf("serialize event: %w", err)
+	}
+	digest := sha256.Sum256(serialized)
+	calculated := fmt.Sprintf("%x", digest[:])
+	if event.ID != calculated {
+		return fmt.Errorf("event ID mismatch: got %s, calculated %s", event.ID, calculated)
+	}
+	return nil
 }
 
 func parseTags(raw [][]string) (map[string][]string, error) {
