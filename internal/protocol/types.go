@@ -39,8 +39,8 @@ type AppDeclaration struct {
 }
 
 var (
-	appIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
-	hex64Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	appIDPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+	hex64Pattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	commitPattern = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
 )
 
