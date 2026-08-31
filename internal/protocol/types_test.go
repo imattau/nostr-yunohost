@@ -1,6 +1,10 @@
 package protocol
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/nbd-wtf/go-nostr"
+)
 
 func validEvent() Event {
 	return Event{
@@ -8,7 +12,7 @@ func validEvent() Event {
 		PubKey:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		CreatedAt: 1,
 		Kind:      AppDeclarationKind,
-		Tags: [][]string{
+		Tags: nostr.Tags{
 			{"d", "hello_nostr"},
 			{"platform", "yunohost"},
 			{"repo", "https://github.com/example/hello_nostr_ynh"},

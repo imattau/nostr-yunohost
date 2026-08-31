@@ -1,20 +1,14 @@
 package protocol
 
 import (
-	"crypto/sha256"
-	"encoding/json"
-	"fmt"
 	"testing"
+
+	"github.com/nbd-wtf/go-nostr"
 )
 
 func TestVerifyID(t *testing.T) {
 	event := validEvent()
-	serialized, err := json.Marshal([]any{0, event.PubKey, event.CreatedAt, event.Kind, event.Tags, event.Content})
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(serialized)
-	event.ID = fmt.Sprintf("%x", digest[:])
+	event.ID = event.GetID()
 	if err := VerifyID(event); err != nil {
 		t.Fatalf("VerifyID() error = %v", err)
 	}
@@ -22,14 +16,28 @@ func TestVerifyID(t *testing.T) {
 
 func TestVerifyIDRejectsMutation(t *testing.T) {
 	event := validEvent()
-	serialized, err := json.Marshal([]any{0, event.PubKey, event.CreatedAt, event.Kind, event.Tags, event.Content})
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(serialized)
-	event.ID = fmt.Sprintf("%x", digest[:])
+	event.ID = event.GetID()
 	event.Content = `{"name":"changed"}`
 	if err := VerifyID(event); err == nil {
 		t.Fatal("VerifyID() accepted a mutated event")
+	}
+}
+
+func TestVerifySignature(t *testing.T) {
+	event := validEvent()
+	privateKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	publicKey, err := nostr.GetPublicKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.PubKey = publicKey
+	if err := event.Sign(privateKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyID(event); err != nil {
+		t.Fatalf("VerifyID() error = %v", err)
+	}
+	if err := VerifySignature(event); err != nil {
+		t.Fatalf("VerifySignature() error = %v", err)
 	}
 }

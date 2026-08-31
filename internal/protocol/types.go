@@ -2,26 +2,20 @@
 package protocol
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/nbd-wtf/go-nostr"
 )
 
 const AppDeclarationKind int = 30078
 
-// Event is the JSON representation used by Nostr relays.
-type Event struct {
-	ID        string     `json:"id"`
-	PubKey    string     `json:"pubkey"`
-	CreatedAt int64      `json:"created_at"`
-	Kind      int        `json:"kind"`
-	Tags      [][]string `json:"tags"`
-	Content   string     `json:"content"`
-	Sig       string     `json:"sig"`
-}
+// Event aliases the SDK's event type so all event serialization, IDs, and
+// signature operations use the maintained Nostr implementation.
+type Event = nostr.Event
 
 // AppDeclaration is the validated, platform-specific data extracted from a
 // parameterised replaceable Nostr app declaration.
@@ -112,23 +106,27 @@ func ParseAppDeclaration(event Event) (AppDeclaration, error) {
 	return declaration, nil
 }
 
-// VerifyID checks the event ID against Nostr's canonical event serialization.
-// It does not verify the Schnorr signature; callers must perform that check
-// with a secp256k1 implementation before trusting the event.
+// VerifyID checks the event ID using the SDK's NIP-01 implementation.
 func VerifyID(event Event) error {
-	serialized, err := json.Marshal([]any{0, event.PubKey, event.CreatedAt, event.Kind, event.Tags, event.Content})
-	if err != nil {
-		return fmt.Errorf("serialize event: %w", err)
-	}
-	digest := sha256.Sum256(serialized)
-	calculated := fmt.Sprintf("%x", digest[:])
-	if event.ID != calculated {
-		return fmt.Errorf("event ID mismatch: got %s, calculated %s", event.ID, calculated)
+	if !event.CheckID() {
+		return fmt.Errorf("event ID does not match the SDK's canonical serialization")
 	}
 	return nil
 }
 
-func parseTags(raw [][]string) (map[string][]string, error) {
+// VerifySignature checks the event's Schnorr signature using the SDK.
+func VerifySignature(event Event) error {
+	valid, err := event.CheckSignature()
+	if err != nil {
+		return fmt.Errorf("check event signature: %w", err)
+	}
+	if !valid {
+		return fmt.Errorf("event signature is invalid")
+	}
+	return nil
+}
+
+func parseTags(raw nostr.Tags) (map[string][]string, error) {
 	values := make(map[string][]string)
 	for _, tag := range raw {
 		if len(tag) < 2 || tag[0] == "" || tag[1] == "" {
