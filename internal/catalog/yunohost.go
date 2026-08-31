@@ -51,14 +51,16 @@ func Translate(declaration protocol.AppDeclaration, manifest map[string]any, pub
 		return YunoHostApp{}, fmt.Errorf("manifest version does not match declaration version")
 	}
 	return YunoHostApp{
-		AddedInCatalog:         publishedAt,
-		AlternativeBranches:    map[string]any{},
-		Antifeatures:           []string{},
-		Category:               declaration.Category,
-		Git:                    GitSource{Branch: "main", Revision: declaration.Commit, URL: declaration.Repository},
-		ID:                     declaration.AppID,
-		LastUpdate:             publishedAt,
-		Level:                  0,
+		AddedInCatalog:      publishedAt,
+		AlternativeBranches: map[string]any{},
+		Antifeatures:        []string{},
+		Category:            declaration.Category,
+		Git:                 GitSource{Branch: "main", Revision: declaration.Commit, URL: declaration.Repository},
+		ID:                  declaration.AppID,
+		LastUpdate:          publishedAt,
+		// Automatic YunoHost CI has not evaluated this declaration. YunoHost
+		// uses -1 for an unknown quality level; level 0 explicitly means broken.
+		Level:                  -1,
 		Manifest:               manifest,
 		Maintained:             true,
 		PotentialAlternativeTo: []string{},

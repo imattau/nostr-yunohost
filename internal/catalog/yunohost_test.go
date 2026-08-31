@@ -15,6 +15,9 @@ func TestTranslateProducesYunoHostEntry(t *testing.T) {
 	if entry.ID != declaration.AppID || entry.Git.Revision != declaration.Commit || entry.Manifest["name"] != "Hello Nostr" {
 		t.Fatalf("unexpected YunoHost entry: %+v", entry)
 	}
+	if entry.Level != -1 {
+		t.Fatalf("expected unknown quality level -1, got %d", entry.Level)
+	}
 }
 
 func TestTranslateRejectsManifestMismatch(t *testing.T) {
