@@ -91,6 +91,8 @@ func runPublish(args []string, out, errOut io.Writer) int {
 	flags := flag.NewFlagSet("publish", flag.ContinueOnError)
 	flags.SetOutput(errOut)
 	repositoryPath := flags.String("repo", ".", "YunoHost package repository")
+	remoteRepository := flags.String("repository-url", "", "remote YunoHost package repository URL")
+	revision := flags.String("ref", "", "branch, tag, or commit for --repository-url")
 	privateKey := flags.String("private-key", os.Getenv("NOSTR_YNH_PRIVATE_KEY"), "Nostr publishing private key")
 	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
 	dryRun := flags.Bool("dry-run", false, "build and sign the event without publishing")
@@ -102,7 +104,13 @@ func runPublish(args []string, out, errOut io.Writer) int {
 		return 2
 	}
 	relayURLs := splitNonEmpty(*relayList)
-	metadata, err := repository.ReadMetadata(*repositoryPath)
+	var metadata publisher.Metadata
+	var err error
+	if *remoteRepository != "" {
+		metadata, err = repository.ReadRemoteMetadata(context.Background(), *remoteRepository, *revision)
+	} else {
+		metadata, err = repository.ReadMetadata(*repositoryPath)
+	}
 	if err != nil {
 		fmt.Fprintf(errOut, "read repository metadata: %v\n", err)
 		return 1
@@ -312,7 +320,7 @@ func splitNonEmpty(raw string) []string {
 func usage(out io.Writer) {
 	fmt.Fprintln(out, "usage:")
 	fmt.Fprintln(out, "  nostr-ynh verify <event.json>")
-	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex> --relays <ws://...,...> [--repo <path>] [--dry-run]")
+	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex> --relays <ws://...,...> [--repo <path>|--repository-url <url> --ref <ref>] [--dry-run]")
 	fmt.Fprintln(out, "  nostr-ynh inspect [--relays <ws://...,...>] <naddr>")
 	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...>")
 	fmt.Fprintln(out, "  nostr-ynh preview [--ref <branch|tag|commit>] <repository-url>")

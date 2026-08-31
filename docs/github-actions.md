@@ -43,6 +43,11 @@ environments where practical.
 For a UI confirmation flow, `nostr-ynh publish --dry-run` builds and signs the
 event, outputs its JSON and `naddr`, and makes no relay connection.
 
+The same command accepts `--repository-url <url> --ref <branch|tag|commit>` to
+preview and publish directly from a remote package repository. A YunoHost
+publisher app can use this mode after displaying the detected manifest and
+hashes for administrator confirmation.
+
 The action currently defaults to `main` because this project has not released a
 versioned binary yet. Once releases exist, workflows should pin
 `nostr-yunohost-version` to a release tag or immutable commit.
