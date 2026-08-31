@@ -67,7 +67,6 @@ func (c *Client) FetchReplaceable(ctx context.Context, publisher, appID string) 
 func (c *Client) FetchAppDeclarations(ctx context.Context) []*nostr.Event {
 	results := c.pool.FetchManyReplaceable(ctx, c.urls, nostr.Filter{
 		Kinds: []int{protocol.AppDeclarationKind},
-		Tags:  nostr.TagMap{"platform": {"yunohost"}},
 	})
 	events := make([]*nostr.Event, 0)
 	results.Range(func(_ nostr.ReplaceableKey, event *nostr.Event) bool {
@@ -94,7 +93,6 @@ func (c *Client) Publish(ctx context.Context, event nostr.Event) []PublishResult
 func (c *Client) SubscribeAppDeclarations(ctx context.Context) <-chan nostr.RelayEvent {
 	return c.pool.SubscribeMany(ctx, c.urls, nostr.Filter{
 		Kinds: []int{protocol.AppDeclarationKind},
-		Tags:  nostr.TagMap{"platform": {"yunohost"}},
 	})
 }
 
