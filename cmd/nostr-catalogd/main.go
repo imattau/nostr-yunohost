@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -23,7 +24,7 @@ func main() {
 	relayList := flag.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
 	trustedList := flag.String("trusted-publishers", os.Getenv("NOSTR_YNH_TRUSTED_PUBLISHERS"), "comma-separated publisher hex keys or npubs")
 	trustedCurators := flag.String("trusted-curators", os.Getenv("NOSTR_YNH_TRUSTED_CURATORS"), "comma-separated curator hex keys or npubs")
-	minimumEndorsements := flag.Int("minimum-endorsements", 1, "minimum trusted endorsements for canonical selection")
+	minimumEndorsements := flag.Int("minimum-endorsements", defaultMinimumEndorsements(), "minimum trusted endorsements for canonical selection")
 	flag.Parse()
 	relays := splitNonEmpty(*relayList)
 	trustedPublishers := splitNonEmpty(*trustedList)
@@ -97,4 +98,17 @@ func splitNonEmpty(raw string) []string {
 		}
 	}
 	return values
+}
+
+func defaultMinimumEndorsements() int {
+	raw := strings.TrimSpace(os.Getenv("NOSTR_YNH_MINIMUM_ENDORSEMENTS"))
+	if raw == "" {
+		return 1
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 {
+		log.Printf("invalid NOSTR_YNH_MINIMUM_ENDORSEMENTS=%q; using 1", raw)
+		return 1
+	}
+	return value
 }
