@@ -94,10 +94,23 @@ func runPublish(args []string, out, errOut io.Writer) int {
 	remoteRepository := flags.String("repository-url", "", "remote YunoHost package repository URL")
 	revision := flags.String("ref", "", "branch, tag, or commit for --repository-url")
 	privateKey := flags.String("private-key", os.Getenv("NOSTR_YNH_PRIVATE_KEY"), "Nostr publishing private key")
+	privateKeyFile := flags.String("private-key-file", "", "file containing the Nostr publishing private key")
 	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
 	dryRun := flags.Bool("dry-run", false, "build and sign the event without publishing")
 	if err := flags.Parse(args); err != nil {
 		return 2
+	}
+	if *privateKeyFile != "" {
+		if *privateKey != "" {
+			fmt.Fprintln(errOut, "use only one of --private-key, --private-key-file, or NOSTR_YNH_PRIVATE_KEY")
+			return 2
+		}
+		data, err := os.ReadFile(*privateKeyFile)
+		if err != nil {
+			fmt.Fprintf(errOut, "read private key file: %v\n", err)
+			return 1
+		}
+		*privateKey = strings.TrimSpace(string(data))
 	}
 	if *privateKey == "" || (!*dryRun && *relayList == "") {
 		fmt.Fprintln(errOut, "publish requires --private-key (or NOSTR_YNH_PRIVATE_KEY) and --relays (or NOSTR_YNH_RELAYS), unless --dry-run is used")
@@ -320,7 +333,7 @@ func splitNonEmpty(raw string) []string {
 func usage(out io.Writer) {
 	fmt.Fprintln(out, "usage:")
 	fmt.Fprintln(out, "  nostr-ynh verify <event.json>")
-	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex> --relays <ws://...,...> [--repo <path>|--repository-url <url> --ref <ref>] [--dry-run]")
+	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex>|--private-key-file <path> --relays <ws://...,...> [--repo <path>|--repository-url <url> --ref <ref>] [--dry-run]")
 	fmt.Fprintln(out, "  nostr-ynh inspect [--relays <ws://...,...>] <naddr>")
 	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...>")
 	fmt.Fprintln(out, "  nostr-ynh preview [--ref <branch|tag|commit>] <repository-url>")

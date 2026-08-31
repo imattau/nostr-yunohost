@@ -43,6 +43,9 @@ environments where practical.
 For a UI confirmation flow, `nostr-ynh publish --dry-run` builds and signs the
 event, outputs its JSON and `naddr`, and makes no relay connection.
 
+YunoHost integrations can use `--private-key-file` to keep the signing key out
+of process arguments. The file should be readable only by the service account.
+
 The same command accepts `--repository-url <url> --ref <branch|tag|commit>` to
 preview and publish directly from a remote package repository. A YunoHost
 publisher app can use this mode after displaying the detected manifest and
