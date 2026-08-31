@@ -60,6 +60,14 @@ jobs:
           pattern: nostr-yunohost-*
           merge-multiple: true
 
+      - name: Create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum dist/*.tar.gz > dist/SHA256SUMS
+
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
