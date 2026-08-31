@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
 )
 
@@ -78,6 +79,18 @@ func BuildDeclaration(metadata Metadata, privateKey string) (nostr.Event, error)
 func HashBytes(data []byte) string {
 	digest := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+// AppAddress encodes the publisher/app identity as a shareable NIP-19 naddr.
+func AppAddress(event nostr.Event, relays []string) (string, error) {
+	if event.Kind != protocol.AppDeclarationKind || !nostr.IsValidPublicKey(event.PubKey) {
+		return "", fmt.Errorf("event is not a valid YunoHost app declaration")
+	}
+	appID := event.Tags.GetD()
+	if appID == "" {
+		return "", fmt.Errorf("event has no app identifier")
+	}
+	return nip19.EncodeEntity(event.PubKey, event.Kind, appID, relays)
 }
 
 func validateMetadata(metadata Metadata) error {

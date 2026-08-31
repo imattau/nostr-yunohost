@@ -107,6 +107,11 @@ func runPublish(args []string, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "build declaration: %v\n", err)
 		return 1
 	}
+	address, err := publisher.AppAddress(event, relayURLs)
+	if err != nil {
+		fmt.Fprintf(errOut, "encode app address: %v\n", err)
+		return 1
+	}
 	client, err := relay.New(context.Background(), relayURLs)
 	if err != nil {
 		fmt.Fprintf(errOut, "configure relays: %v\n", err)
@@ -117,6 +122,7 @@ func runPublish(args []string, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "write event: %v\n", err)
 		return 1
 	}
+	fmt.Fprintf(errOut, "naddr: %s\n", address)
 	succeeded := 0
 	for _, result := range results {
 		if result.Error != nil {
