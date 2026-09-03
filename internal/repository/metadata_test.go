@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nostr-yunohost/nostr-yunohost/internal/publisher"
@@ -52,5 +53,38 @@ func TestReadMetadata(t *testing.T) {
 	}
 	if preview.Commit != metadata.Commit || preview.AppID != metadata.AppID {
 		t.Fatalf("unexpected preview metadata: %+v", preview)
+	}
+}
+
+// Regression: exec.Cmd.Output() populates *exec.ExitError.Stderr on a
+// nonzero exit, but ExitError.Error() itself only ever renders "exit
+// status N" - callers wrapping a git failure with "clone repository: %w"
+// used to lose git's own diagnostic message entirely (e.g. "Remote branch
+// X not found in upstream origin"), making every git failure
+// indistinguishable from any other. wrapGitError must include it.
+func TestReadRemoteMetadataIncludesGitStderrOnFailure(t *testing.T) {
+	directory := t.TempDir()
+	manifest := "id = \"hello_nostr\"\nversion = \"1.0.0~ynh1\"\nname = \"Hello Nostr\"\ndescription.en = \"A test app\"\ncategory = \"test\"\n\n[integration]\narchitectures = [\"amd64\"]\n"
+	if err := os.WriteFile(filepath.Join(directory, "manifest.toml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@example.invalid"},
+		{"config", "user.name", "Test"},
+		{"add", "manifest.toml"},
+		{"commit", "-m", "test"},
+	} {
+		if _, err := gitCommand(directory, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err := ReadRemoteMetadata(context.Background(), directory, "nonexistent-branch-xyz")
+	if err == nil {
+		t.Fatal("expected an error for a nonexistent branch")
+	}
+	if !strings.Contains(err.Error(), "nonexistent-branch-xyz") {
+		t.Fatalf("error should include git's own stderr naming the missing branch, got: %v", err)
 	}
 }

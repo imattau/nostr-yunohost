@@ -4,6 +4,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -187,11 +188,33 @@ func gitOutput(directory string, args ...string) (string, error) {
 func gitCommand(directory string, args ...string) ([]byte, error) {
 	command := exec.Command("git", args...)
 	command.Dir = directory
-	return command.Output()
+	output, err := command.Output()
+	if err != nil {
+		return output, wrapGitError(args, err)
+	}
+	return output, nil
 }
 
 func gitCommandContext(ctx context.Context, directory string, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, "git", args...)
 	command.Dir = directory
-	return command.Output()
+	output, err := command.Output()
+	if err != nil {
+		return output, wrapGitError(args, err)
+	}
+	return output, nil
+}
+
+// wrapGitError includes git's own stderr in the returned error. Go's
+// exec.Cmd.Output() populates *exec.ExitError.Stderr on a nonzero exit,
+// but ExitError.Error() itself only ever renders "exit status N" - every
+// git failure (missing branch, auth failure, network error, ...) was
+// previously indistinguishable from any other, all the way up through
+// every caller's "clone repository: %w"-style wrapping.
+func wrapGitError(args []string, err error) error {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(exitErr.Stderr)))
+	}
+	return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 }
