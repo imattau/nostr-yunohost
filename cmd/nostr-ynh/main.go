@@ -61,11 +61,12 @@ func run(args []string, out, errOut io.Writer) int {
 func runVerify(args []string, out, errOut io.Writer) int {
 	flags := flag.NewFlagSet("verify", flag.ContinueOnError)
 	flags.SetOutput(errOut)
+	jsonOutput := flags.Bool("json", false, "emit machine-readable JSON")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	if flags.NArg() != 1 {
-		fmt.Fprintln(errOut, "usage: nostr-ynh verify <event.json>")
+		fmt.Fprintln(errOut, "usage: nostr-ynh verify [--json] <event.json>")
 		return 2
 	}
 	data, err := os.ReadFile(flags.Arg(0))
@@ -91,6 +92,13 @@ func runVerify(args []string, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "invalid app declaration: %v\n", err)
 		return 1
 	}
+	if *jsonOutput {
+		if err := json.NewEncoder(out).Encode(declaration); err != nil {
+			fmt.Fprintf(errOut, "write declaration: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 	fmt.Fprintf(out, "valid app declaration: %s (%s)\n", declaration.AppID, declaration.Version)
 	fmt.Fprintf(out, "publisher: %s\nrepository: %s\ncommit: %s\n", declaration.Publisher, declaration.Repository, declaration.Commit)
 	return 0
@@ -106,6 +114,7 @@ func runPublish(args []string, out, errOut io.Writer) int {
 	privateKeyFile := flags.String("private-key-file", "", "file containing the Nostr publishing private key")
 	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
 	dryRun := flags.Bool("dry-run", false, "build and sign the event without publishing")
+	jsonOutput := flags.Bool("json", false, "emit one machine-readable JSON result")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -148,6 +157,9 @@ func runPublish(args []string, out, errOut io.Writer) int {
 		return 1
 	}
 	if *dryRun {
+		if *jsonOutput {
+			return writePublishJSON(out, event, address, nil)
+		}
 		if err := json.NewEncoder(out).Encode(event); err != nil {
 			fmt.Fprintf(errOut, "write event: %v\n", err)
 			return 1
@@ -161,6 +173,9 @@ func runPublish(args []string, out, errOut io.Writer) int {
 		return 1
 	}
 	results := client.Publish(context.Background(), event)
+	if *jsonOutput {
+		return writePublishJSON(out, event, address, results)
+	}
 	if err := json.NewEncoder(out).Encode(event); err != nil {
 		fmt.Fprintf(errOut, "write event: %v\n", err)
 		return 1
@@ -181,9 +196,42 @@ func runPublish(args []string, out, errOut io.Writer) int {
 	return 0
 }
 
+type publishJSONResult struct {
+	Event     nostr.Event          `json:"event"`
+	Naddr     string               `json:"naddr"`
+	Published bool                 `json:"published"`
+	Relays    []publishRelayResult `json:"relays"`
+}
+
+type publishRelayResult struct {
+	Relay     string `json:"relay"`
+	Published bool   `json:"published"`
+	Error     string `json:"error,omitempty"`
+}
+
+func writePublishJSON(out io.Writer, event nostr.Event, address string, results []relay.PublishResult) int {
+	response := publishJSONResult{Event: event, Naddr: address, Relays: []publishRelayResult{}}
+	for _, result := range results {
+		relayResult := publishRelayResult{Relay: result.Relay, Published: result.Error == nil}
+		if result.Error != nil {
+			relayResult.Error = result.Error.Error()
+		}
+		response.Relays = append(response.Relays, relayResult)
+		response.Published = response.Published || relayResult.Published
+	}
+	if err := json.NewEncoder(out).Encode(response); err != nil {
+		return 1
+	}
+	if len(results) > 0 && !response.Published {
+		return 1
+	}
+	return 0
+}
+
 func runInspect(args []string, out, errOut io.Writer) int {
 	flags := flag.NewFlagSet("inspect", flag.ContinueOnError)
 	flags.SetOutput(errOut)
+	jsonOutput := flags.Bool("json", false, "emit machine-readable JSON")
 	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -229,10 +277,14 @@ func runInspect(args []string, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "invalid app declaration: %v\n", err)
 		return 1
 	}
-	if err := json.NewEncoder(out).Encode(declaration); err != nil {
-		fmt.Fprintf(errOut, "write declaration: %v\n", err)
-		return 1
+	if *jsonOutput {
+		if err := json.NewEncoder(out).Encode(declaration); err != nil {
+			fmt.Fprintf(errOut, "write declaration: %v\n", err)
+			return 1
+		}
+		return 0
 	}
+	fmt.Fprintf(out, "app: %s (%s)\npublisher: %s\nrepository: %s\ncommit: %s\n", declaration.AppID, declaration.Version, declaration.Publisher, declaration.Repository, declaration.Commit)
 	return 0
 }
 
@@ -423,9 +475,9 @@ func splitNonEmpty(raw string) []string {
 
 func usage(out io.Writer) {
 	fmt.Fprintln(out, "usage:")
-	fmt.Fprintln(out, "  nostr-ynh verify <event.json>")
-	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex>|--private-key-file <path> --relays <ws://...,...> [--repo <path>|--repository-url <url> --ref <ref>] [--dry-run]")
-	fmt.Fprintln(out, "  nostr-ynh inspect [--relays <ws://...,...>] <naddr>")
+	fmt.Fprintln(out, "  nostr-ynh verify [--json] <event.json>")
+	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex>|--private-key-file <path> --relays <ws://...,...> [--repo <path>|--repository-url <url> --ref <ref>] [--dry-run] [--json]")
+	fmt.Fprintln(out, "  nostr-ynh inspect [--json] [--relays <ws://...,...>] <naddr>")
 	fmt.Fprintln(out, "  nostr-ynh endorse [--claim recommend|tested] [--comment <text>] [--private-key <hex>|--private-key-file <path>] [--relays <ws://...,...>] <naddr>")
 	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...>")
 	fmt.Fprintln(out, "  nostr-ynh preview [--ref <branch|tag|commit>] <repository-url>")
