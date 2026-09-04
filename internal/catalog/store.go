@@ -49,7 +49,8 @@ func selectSameSourceLatest(candidates []record) (record, bool) {
 }
 
 func normalizeRepository(repository string) string {
-	return strings.TrimRight(strings.TrimSpace(repository), "/")
+	repository = strings.TrimRight(strings.TrimSpace(repository), "/")
+	return strings.TrimSuffix(repository, ".git")
 }
 
 func newerRecord(left, right record) bool {

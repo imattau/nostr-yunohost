@@ -118,7 +118,7 @@ func TestWriteSnapshotOmitsPublisherCollision(t *testing.T) {
 }
 
 func TestWriteSnapshotSelectsLatestVerifiedSameSource(t *testing.T) {
-	first := signedEventWith(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "same_app", "https://github.com/example/app_ynh/", "1.0.0~ynh1", 10)
+	first := signedEventWith(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "same_app", "https://github.com/example/app_ynh.git/", "1.0.0~ynh1", 10)
 	second := signedEventWith(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "same_app", "https://github.com/example/app_ynh", "1.1.0~ynh1", 1)
 	firstPublisher, _ := nostr.GetPublicKey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	secondPublisher, _ := nostr.GetPublicKey("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
