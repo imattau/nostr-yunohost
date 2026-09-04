@@ -33,6 +33,7 @@ type YunoHostApp struct {
 	ID                     string         `json:"id"`
 	LastUpdate             int64          `json:"lastUpdate"`
 	Level                  int            `json:"level"`
+	LogoHash               string         `json:"logo_hash,omitempty"`
 	Manifest               map[string]any `json:"manifest"`
 	Maintained             bool           `json:"maintained"`
 	PotentialAlternativeTo []string       `json:"potential_alternative_to"`
@@ -49,6 +50,12 @@ type GitSource struct {
 // Translate converts a validated declaration and the authoritative manifest
 // fetched from its pinned repository into the YunoHost v3 app entry.
 func Translate(declaration protocol.AppDeclaration, manifest map[string]any, publishedAt int64) (YunoHostApp, error) {
+	return TranslateWithLogo(declaration, manifest, "", publishedAt)
+}
+
+// TranslateWithLogo converts a verified package and optional local logo into
+// the YunoHost v3 app representation.
+func TranslateWithLogo(declaration protocol.AppDeclaration, manifest map[string]any, logoHash string, publishedAt int64) (YunoHostApp, error) {
 	if manifest == nil {
 		return YunoHostApp{}, fmt.Errorf("manifest is required")
 	}
@@ -72,6 +79,7 @@ func Translate(declaration protocol.AppDeclaration, manifest map[string]any, pub
 		// compatibility floor that keeps custom-catalogue installs upgradeable;
 		// HighQuality remains false so this is not presented as fully vetted.
 		Level:                  5,
+		LogoHash:               logoHash,
 		Manifest:               manifest,
 		Maintained:             true,
 		PotentialAlternativeTo: []string{},

@@ -15,6 +15,7 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/curation"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/repository"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
 )
 
@@ -23,7 +24,10 @@ type record struct {
 	Declaration protocol.AppDeclaration
 	CreatedAt   nostr.Timestamp
 	Manifest    map[string]any
+	Logo        []byte
+	LogoHash    string
 }
+
 // selectSameSourceLatest resolves a duplicate app ID when every declaration
 // points at the same repository. Trust and repository verification have
 // already happened before records reach this point. A different repository
@@ -163,15 +167,25 @@ func (s *Store) Ingest(event nostr.Event) error {
 // IngestVerified applies trust validation and then verifies the authoritative
 // repository before adding the declaration to the store.
 func (s *Store) IngestVerified(ctx context.Context, event nostr.Event, verify func(context.Context, protocol.AppDeclaration) (map[string]any, error)) error {
+	return s.IngestVerifiedPackage(ctx, event, func(ctx context.Context, declaration protocol.AppDeclaration) (repository.VerifiedPackage, error) {
+		manifest, err := verify(ctx, declaration)
+		return repository.VerifiedPackage{Manifest: manifest}, err
+	})
+}
+
+// IngestVerifiedPackage is like IngestVerified but also retains an optional
+// verified logo for serving through the YunoHost catalogue endpoint.
+func (s *Store) IngestVerifiedPackage(ctx context.Context, event nostr.Event, verify func(context.Context, protocol.AppDeclaration) (repository.VerifiedPackage, error)) error {
 	declaration, err := s.policy.Validate(event)
 	if err != nil {
 		return err
 	}
-	manifest, err := verify(ctx, declaration)
+	verified, err := verify(ctx, declaration)
 	if err != nil {
 		return fmt.Errorf("verify repository: %w", err)
 	}
-	if _, err := Translate(declaration, manifest, int64(event.CreatedAt)); err != nil {
+	logoHash := repository.LogoHash(verified.Logo)
+	if _, err := TranslateWithLogo(declaration, verified.Manifest, logoHash, int64(event.CreatedAt)); err != nil {
 		return fmt.Errorf("translate catalogue entry: %w", err)
 	}
 	key := declaration.Publisher + "\x00" + declaration.AppID
@@ -180,7 +194,7 @@ func (s *Store) IngestVerified(ctx context.Context, event nostr.Event, verify fu
 	if current, ok := s.entries[key]; ok && current.CreatedAt >= event.CreatedAt {
 		return nil
 	}
-	s.entries[key] = record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt, Manifest: manifest}
+	s.entries[key] = record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt, Manifest: verified.Manifest, Logo: verified.Logo, LogoHash: logoHash}
 	return nil
 }
 
@@ -259,11 +273,11 @@ func (s *Store) Load(path string) error {
 		if entry.Manifest == nil {
 			continue
 		}
-		if _, err := Translate(declaration, entry.Manifest, int64(entry.Event.CreatedAt)); err != nil {
+		if _, err := TranslateWithLogo(declaration, entry.Manifest, entry.LogoHash, int64(entry.Event.CreatedAt)); err != nil {
 			continue
 		}
 		key := declaration.Publisher + "\x00" + declaration.AppID
-		s.entries[key] = record{Event: entry.Event, Declaration: declaration, CreatedAt: entry.Event.CreatedAt, Manifest: entry.Manifest}
+		s.entries[key] = record{Event: entry.Event, Declaration: declaration, CreatedAt: entry.Event.CreatedAt, Manifest: entry.Manifest, Logo: entry.Logo, LogoHash: entry.LogoHash}
 	}
 	return nil
 }
@@ -332,7 +346,7 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 				}
 			}
 		}
-		app, err := Translate(selected.Declaration, selected.Manifest, int64(selected.CreatedAt))
+		app, err := TranslateWithLogo(selected.Declaration, selected.Manifest, selected.LogoHash, int64(selected.CreatedAt))
 		if err != nil {
 			s.mu.RUnlock()
 			return fmt.Errorf("translate app %s: %w", appID, err)
@@ -346,4 +360,17 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 	}
 	_, err = output.Write(append(data, '\n'))
 	return err
+}
+
+// WriteLogo writes a cached verified PNG by its YunoHost logo hash.
+func (s *Store) WriteLogo(hash string, output interface{ Write([]byte) (int, error) }) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, entry := range s.entries {
+		if entry.LogoHash == hash && len(entry.Logo) > 0 {
+			_, _ = output.Write(entry.Logo)
+			return true
+		}
+	}
+	return false
 }

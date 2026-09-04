@@ -4,6 +4,7 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -23,6 +24,14 @@ type manifest struct {
 	Description   string
 	Category      string
 	Architectures []string
+}
+
+// VerifiedPackage contains the authoritative package metadata and its
+// optional YunoHost logo. Logo bytes are returned so the catalogue can serve
+// them locally instead of making YunoHost fetch arbitrary third-party URLs.
+type VerifiedPackage struct {
+	Manifest map[string]any
+	Logo     []byte
 }
 
 // ReadMetadata reads manifest.toml and Git metadata from a package directory.
@@ -124,17 +133,17 @@ func stringSlice(value any) []string {
 
 // VerifyDeclaration fetches a declaration's repository at its exact commit,
 // verifies both advertised hashes, and returns the authoritative manifest.
-func VerifyDeclaration(ctx context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+func VerifyDeclaration(ctx context.Context, declaration protocol.AppDeclaration) (VerifiedPackage, error) {
 	temporaryDirectory, err := os.MkdirTemp("", "nostr-ynh-repository-")
 	if err != nil {
-		return nil, fmt.Errorf("create repository workspace: %w", err)
+		return VerifiedPackage{}, fmt.Errorf("create repository workspace: %w", err)
 	}
 	defer os.RemoveAll(temporaryDirectory)
 	if _, err := gitCommandContext(ctx, temporaryDirectory, "clone", "--no-checkout", "--filter=blob:none", "--quiet", declaration.Repository, "."); err != nil {
-		return nil, fmt.Errorf("clone repository: %w", err)
+		return VerifiedPackage{}, fmt.Errorf("clone repository: %w", err)
 	}
 	if _, err := gitCommandContext(ctx, temporaryDirectory, "checkout", "--detach", "--quiet", declaration.Commit); err != nil {
-		return nil, fmt.Errorf("checkout declared commit: %w", err)
+		return VerifiedPackage{}, fmt.Errorf("checkout declared commit: %w", err)
 	}
 	return verifyCheckedOutDirectory(ctx, temporaryDirectory, declaration)
 }
@@ -158,26 +167,58 @@ func ReadRemoteMetadata(ctx context.Context, repositoryURL, revision string) (pu
 	return ReadMetadata(temporaryDirectory)
 }
 
-func verifyCheckedOutDirectory(ctx context.Context, directory string, declaration protocol.AppDeclaration) (map[string]any, error) {
+func verifyCheckedOutDirectory(ctx context.Context, directory string, declaration protocol.AppDeclaration) (VerifiedPackage, error) {
 	manifestBytes, err := os.ReadFile(filepath.Join(directory, "manifest.toml"))
 	if err != nil {
-		return nil, fmt.Errorf("read repository manifest: %w", err)
+		return VerifiedPackage{}, fmt.Errorf("read repository manifest: %w", err)
 	}
 	if publisher.HashBytes(manifestBytes) != declaration.ManifestHash {
-		return nil, fmt.Errorf("manifest hash does not match declaration")
+		return VerifiedPackage{}, fmt.Errorf("manifest hash does not match declaration")
 	}
 	archive, err := gitCommandContext(ctx, directory, "archive", "--format=tar", "HEAD")
 	if err != nil {
-		return nil, fmt.Errorf("archive checked-out repository: %w", err)
+		return VerifiedPackage{}, fmt.Errorf("archive checked-out repository: %w", err)
 	}
 	if publisher.HashBytes(archive) != declaration.ContentHash {
-		return nil, fmt.Errorf("repository content hash does not match declaration")
+		return VerifiedPackage{}, fmt.Errorf("repository content hash does not match declaration")
 	}
 	var manifest map[string]any
 	if err := toml.Unmarshal(manifestBytes, &manifest); err != nil {
-		return nil, fmt.Errorf("parse repository manifest: %w", err)
+		return VerifiedPackage{}, fmt.Errorf("parse repository manifest: %w", err)
 	}
-	return manifest, nil
+	logo, err := readLogo(directory)
+	if err != nil {
+		return VerifiedPackage{}, err
+	}
+	return VerifiedPackage{Manifest: manifest, Logo: logo}, nil
+}
+
+func readLogo(directory string) ([]byte, error) {
+	path := filepath.Join(directory, "logo.png")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read logo.png: %w", err)
+	}
+	if len(data) == 0 || len(data) > 2<<20 {
+		return nil, nil
+	}
+	magic := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}
+	if len(data) < len(magic) || string(data[:len(magic)]) != string(magic) {
+		return nil, nil
+	}
+	return data, nil
+}
+
+// LogoHash returns the YunoHost catalogue hash for an optional logo.
+func LogoHash(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	digest := sha256.Sum256(data)
+	return fmt.Sprintf("%x", digest[:])
 }
 
 func gitOutput(directory string, args ...string) (string, error) {

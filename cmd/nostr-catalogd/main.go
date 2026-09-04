@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -58,7 +59,7 @@ func main() {
 		log.Printf("load catalogue cache: %v", err)
 	}
 	for _, event := range client.FetchAppDeclarations(ctx, policy.Publishers()) {
-		if err := store.IngestVerified(ctx, *event, repository.VerifyDeclaration); err != nil {
+		if err := store.IngestVerifiedPackage(ctx, *event, repository.VerifyDeclaration); err != nil {
 			log.Printf("reject event %s: %v", event.ID, err)
 			continue
 		}
@@ -68,7 +69,7 @@ func main() {
 	}
 	go func() {
 		for received := range client.SubscribeAppDeclarations(ctx) {
-			if err := store.IngestVerified(ctx, *received.Event, repository.VerifyDeclaration); err != nil {
+			if err := store.IngestVerifiedPackage(ctx, *received.Event, repository.VerifyDeclaration); err != nil {
 				log.Printf("reject event %s: %v", received.ID, err)
 				continue
 			}
@@ -97,6 +98,15 @@ func main() {
 		if err := store.WriteSnapshot(response); err != nil {
 			log.Printf("write catalogue: %v", err)
 		}
+	})
+	mux.HandleFunc("/v3/logos/", func(response http.ResponseWriter, request *http.Request) {
+		hash := strings.TrimPrefix(request.URL.Path, "/v3/logos/")
+		hash = strings.TrimSuffix(hash, ".png")
+		if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(hash) || !store.WriteLogo(hash, response) {
+			http.NotFound(response, request)
+			return
+		}
+		response.Header().Set("Content-Type", "image/png")
 	})
 	server := &http.Server{Addr: *listen, Handler: mux}
 	go func() {
