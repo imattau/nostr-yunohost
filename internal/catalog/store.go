@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -22,6 +23,103 @@ type record struct {
 	Declaration protocol.AppDeclaration
 	CreatedAt   nostr.Timestamp
 	Manifest    map[string]any
+}
+// selectSameSourceLatest resolves a duplicate app ID when every declaration
+// points at the same repository. Trust and repository verification have
+// already happened before records reach this point. A different repository
+// remains ambiguous and must be curated explicitly.
+func selectSameSourceLatest(candidates []record) (record, bool) {
+	if len(candidates) == 0 {
+		return record{}, false
+	}
+	repository := normalizeRepository(candidates[0].Declaration.Repository)
+	for _, candidate := range candidates[1:] {
+		if normalizeRepository(candidate.Declaration.Repository) != repository {
+			return record{}, false
+		}
+	}
+	selected := candidates[0]
+	for _, candidate := range candidates[1:] {
+		versionOrder := comparePackageVersions(candidate.Declaration.Version, selected.Declaration.Version)
+		if versionOrder > 0 || (versionOrder == 0 && newerRecord(candidate, selected)) {
+			selected = candidate
+		}
+	}
+	return selected, true
+}
+
+func normalizeRepository(repository string) string {
+	return strings.TrimRight(strings.TrimSpace(repository), "/")
+}
+
+func newerRecord(left, right record) bool {
+	if left.CreatedAt != right.CreatedAt {
+		return left.CreatedAt > right.CreatedAt
+	}
+	if left.Declaration.Publisher != right.Declaration.Publisher {
+		return left.Declaration.Publisher > right.Declaration.Publisher
+	}
+	return left.Event.ID > right.Event.ID
+}
+
+// comparePackageVersions provides the ordering needed by YunoHost versions,
+// including the commonly used ~ynh suffix. It follows Debian's useful rule
+// that '~' sorts before every other character, while comparing digit runs as
+// numbers and all other runs lexically. This keeps the core dependency-free.
+func comparePackageVersions(left, right string) int {
+	for i, j := 0, 0; i < len(left) || j < len(right); {
+		if i == len(left) {
+			return -1
+		}
+		if j == len(right) {
+			return 1
+		}
+		if left[i] == '~' || right[j] == '~' {
+			if left[i] == right[j] {
+				i++
+				j++
+				continue
+			}
+			if left[i] == '~' {
+				return -1
+			}
+			return 1
+		}
+		leftDigit, rightDigit := left[i] >= '0' && left[i] <= '9', right[j] >= '0' && right[j] <= '9'
+		if leftDigit && rightDigit {
+			leftEnd, rightEnd := i, j
+			for leftEnd < len(left) && left[leftEnd] >= '0' && left[leftEnd] <= '9' {
+				leftEnd++
+			}
+			for rightEnd < len(right) && right[rightEnd] >= '0' && right[rightEnd] <= '9' {
+				rightEnd++
+			}
+			leftRun, rightRun := strings.TrimLeft(left[i:leftEnd], "0"), strings.TrimLeft(right[j:rightEnd], "0")
+			if len(leftRun) != len(rightRun) {
+				if len(leftRun) > len(rightRun) {
+					return 1
+				}
+				return -1
+			}
+			if leftRun != rightRun {
+				if leftRun > rightRun {
+					return 1
+				}
+				return -1
+			}
+			i, j = leftEnd, rightEnd
+			continue
+		}
+		if left[i] != right[j] {
+			if left[i] > right[j] {
+				return 1
+			}
+			return -1
+		}
+		i++
+		j++
+	}
+	return 0
 }
 
 // Store keeps the latest accepted declaration for each publisher/app pair.
@@ -210,21 +308,26 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 		if len(candidates) == 1 {
 			selected = candidates[0]
 		} else {
-			if s.curationPolicy == nil {
+			var ok bool
+			selected, ok = selectSameSourceLatest(candidates)
+			if ok {
+				// Same-source declarations are safe to resolve without curator input.
+			} else if s.curationPolicy == nil {
 				continue
-			}
-			declarations := make([]protocol.AppDeclaration, 0, len(candidates))
-			for _, candidate := range candidates {
-				declarations = append(declarations, candidate.Declaration)
-			}
-			declaration := s.curationPolicy.SelectCanonical(declarations, s.endorsements)
-			if declaration == nil {
-				continue
-			}
-			for _, candidate := range candidates {
-				if candidate.Declaration.Publisher == declaration.Publisher {
-					selected = candidate
-					break
+			} else {
+				declarations := make([]protocol.AppDeclaration, 0, len(candidates))
+				for _, candidate := range candidates {
+					declarations = append(declarations, candidate.Declaration)
+				}
+				declaration := s.curationPolicy.SelectCanonical(declarations, s.endorsements)
+				if declaration == nil {
+					continue
+				}
+				for _, candidate := range candidates {
+					if candidate.Declaration.Publisher == declaration.Publisher {
+						selected = candidate
+						break
+					}
 				}
 			}
 		}

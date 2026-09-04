@@ -39,7 +39,6 @@ func TestStoreIngestsAndOrdersDeclarations(t *testing.T) {
 		t.Fatal("snapshot was empty")
 	}
 }
-
 func TestWriteSnapshotIncludesVerifiedApps(t *testing.T) {
 	event := signedEvent(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "hello_nostr")
 	publicKey, _ := nostr.GetPublicKey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -92,7 +91,7 @@ func TestStoreCacheRoundTrip(t *testing.T) {
 
 func TestWriteSnapshotOmitsPublisherCollision(t *testing.T) {
 	first := signedEvent(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "same_app")
-	second := signedEvent(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "same_app")
+	second := signedEventWith(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "same_app", "https://github.com/example/other_app_ynh", "1.0.0~ynh1", 1)
 	firstPublisher, _ := nostr.GetPublicKey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	secondPublisher, _ := nostr.GetPublicKey("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 	policy, err := trust.NewExplicitPublishers([]string{firstPublisher, secondPublisher})
@@ -118,15 +117,47 @@ func TestWriteSnapshotOmitsPublisherCollision(t *testing.T) {
 	}
 }
 
+func TestWriteSnapshotSelectsLatestVerifiedSameSource(t *testing.T) {
+	first := signedEventWith(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "same_app", "https://github.com/example/app_ynh/", "1.0.0~ynh1", 10)
+	second := signedEventWith(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "same_app", "https://github.com/example/app_ynh", "1.1.0~ynh1", 1)
+	firstPublisher, _ := nostr.GetPublicKey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	secondPublisher, _ := nostr.GetPublicKey("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	policy, err := trust.NewExplicitPublishers([]string{firstPublisher, secondPublisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), first, verify); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IngestVerified(context.Background(), second, verify); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := store.WriteSnapshot(&output); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(output.Bytes(), []byte(`"version":"1.1.0~ynh1"`)) {
+		t.Fatalf("snapshot did not select highest same-source version: %s", output.String())
+	}
+}
+
 func signedEvent(t *testing.T, privateKey, appID string) nostr.Event {
+	return signedEventWith(t, privateKey, appID, "https://github.com/example/app_ynh", "1.0.0~ynh1", 1)
+}
+
+func signedEventWith(t *testing.T, privateKey, appID, repository, version string, createdAt nostr.Timestamp) nostr.Event {
 	t.Helper()
 	publicKey, err := nostr.GetPublicKey(privateKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	event := nostr.Event{
-		PubKey: publicKey, CreatedAt: nostr.Timestamp(1), Kind: 30078,
-		Tags:    nostr.Tags{{"d", appID}, {"platform", "yunohost"}, {"repo", "https://github.com/example/app_ynh"}, {"version", "1.0.0~ynh1"}, {"commit", "cccccccccccccccccccccccccccccccccccccccc"}, {"manifest", "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}, {"content", "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}},
+		PubKey: publicKey, CreatedAt: createdAt, Kind: 30078,
+		Tags:    nostr.Tags{{"d", appID}, {"platform", "yunohost"}, {"repo", repository}, {"version", version}, {"commit", "cccccccccccccccccccccccccccccccccccccccc"}, {"manifest", "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}, {"content", "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}},
 		Content: "{}",
 	}
 	if err := event.Sign(privateKey); err != nil {
