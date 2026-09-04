@@ -32,6 +32,7 @@ type manifest struct {
 type VerifiedPackage struct {
 	Manifest map[string]any
 	Logo     []byte
+	Branch   string
 }
 
 // ReadMetadata reads manifest.toml and Git metadata from a package directory.
@@ -190,7 +191,14 @@ func verifyCheckedOutDirectory(ctx context.Context, directory string, declaratio
 	if err != nil {
 		return VerifiedPackage{}, err
 	}
-	return VerifiedPackage{Manifest: manifest, Logo: logo}, nil
+	branch := "main"
+	if remoteHead, branchErr := gitOutput(directory, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); branchErr == nil {
+		branch = strings.TrimPrefix(remoteHead, "origin/")
+		if branch == "" {
+			branch = "main"
+		}
+	}
+	return VerifiedPackage{Manifest: manifest, Logo: logo, Branch: branch}, nil
 }
 
 func readLogo(directory string) ([]byte, error) {

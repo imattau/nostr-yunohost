@@ -50,12 +50,18 @@ type GitSource struct {
 // Translate converts a validated declaration and the authoritative manifest
 // fetched from its pinned repository into the YunoHost v3 app entry.
 func Translate(declaration protocol.AppDeclaration, manifest map[string]any, publishedAt int64) (YunoHostApp, error) {
-	return TranslateWithLogo(declaration, manifest, "", publishedAt)
+	return TranslateWithBranch(declaration, manifest, "", "main", publishedAt)
 }
 
 // TranslateWithLogo converts a verified package and optional local logo into
 // the YunoHost v3 app representation.
 func TranslateWithLogo(declaration protocol.AppDeclaration, manifest map[string]any, logoHash string, publishedAt int64) (YunoHostApp, error) {
+	return TranslateWithBranch(declaration, manifest, logoHash, "main", publishedAt)
+}
+
+// TranslateWithBranch converts a verified package into the YunoHost v3 app
+// representation, preserving the repository's actual default branch.
+func TranslateWithBranch(declaration protocol.AppDeclaration, manifest map[string]any, logoHash, branch string, publishedAt int64) (YunoHostApp, error) {
 	if manifest == nil {
 		return YunoHostApp{}, fmt.Errorf("manifest is required")
 	}
@@ -65,12 +71,15 @@ func TranslateWithLogo(declaration protocol.AppDeclaration, manifest map[string]
 	if manifestVersion, ok := manifest["version"].(string); !ok || manifestVersion != declaration.Version {
 		return YunoHostApp{}, fmt.Errorf("manifest version does not match declaration version")
 	}
+	if branch == "" {
+		branch = "main"
+	}
 	return YunoHostApp{
 		AddedInCatalog:      publishedAt,
 		AlternativeBranches: map[string]any{},
 		Antifeatures:        []string{},
 		Category:            declaration.Category,
-		Git:                 GitSource{Branch: "main", Revision: declaration.Commit, URL: declaration.Repository},
+		Git:                 GitSource{Branch: branch, Revision: declaration.Commit, URL: declaration.Repository},
 		ID:                  declaration.AppID,
 		LastUpdate:          publishedAt,
 		// YunoHost treats levels <= 4 as bad quality and blocks upgrades. This

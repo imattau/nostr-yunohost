@@ -26,6 +26,7 @@ type record struct {
 	Manifest    map[string]any
 	Logo        []byte
 	LogoHash    string
+	Branch      string
 }
 
 // selectSameSourceLatest resolves a duplicate app ID when every declaration
@@ -185,7 +186,7 @@ func (s *Store) IngestVerifiedPackage(ctx context.Context, event nostr.Event, ve
 		return fmt.Errorf("verify repository: %w", err)
 	}
 	logoHash := repository.LogoHash(verified.Logo)
-	if _, err := TranslateWithLogo(declaration, verified.Manifest, logoHash, int64(event.CreatedAt)); err != nil {
+	if _, err := TranslateWithBranch(declaration, verified.Manifest, logoHash, verified.Branch, int64(event.CreatedAt)); err != nil {
 		return fmt.Errorf("translate catalogue entry: %w", err)
 	}
 	key := declaration.Publisher + "\x00" + declaration.AppID
@@ -194,7 +195,7 @@ func (s *Store) IngestVerifiedPackage(ctx context.Context, event nostr.Event, ve
 	if current, ok := s.entries[key]; ok && current.CreatedAt >= event.CreatedAt {
 		return nil
 	}
-	s.entries[key] = record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt, Manifest: verified.Manifest, Logo: verified.Logo, LogoHash: logoHash}
+	s.entries[key] = record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt, Manifest: verified.Manifest, Logo: verified.Logo, LogoHash: logoHash, Branch: verified.Branch}
 	return nil
 }
 
@@ -273,11 +274,15 @@ func (s *Store) Load(path string) error {
 		if entry.Manifest == nil {
 			continue
 		}
-		if _, err := TranslateWithLogo(declaration, entry.Manifest, entry.LogoHash, int64(entry.Event.CreatedAt)); err != nil {
+		if _, err := TranslateWithBranch(declaration, entry.Manifest, entry.LogoHash, entry.Branch, int64(entry.Event.CreatedAt)); err != nil {
 			continue
 		}
 		key := declaration.Publisher + "\x00" + declaration.AppID
-		s.entries[key] = record{Event: entry.Event, Declaration: declaration, CreatedAt: entry.Event.CreatedAt, Manifest: entry.Manifest, Logo: entry.Logo, LogoHash: entry.LogoHash}
+		branch := entry.Branch
+		if branch == "" {
+			branch = "main"
+		}
+		s.entries[key] = record{Event: entry.Event, Declaration: declaration, CreatedAt: entry.Event.CreatedAt, Manifest: entry.Manifest, Logo: entry.Logo, LogoHash: entry.LogoHash, Branch: branch}
 	}
 	return nil
 }
@@ -346,7 +351,7 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 				}
 			}
 		}
-		app, err := TranslateWithLogo(selected.Declaration, selected.Manifest, selected.LogoHash, int64(selected.CreatedAt))
+		app, err := TranslateWithBranch(selected.Declaration, selected.Manifest, selected.LogoHash, selected.Branch, int64(selected.CreatedAt))
 		if err != nil {
 			s.mu.RUnlock()
 			return fmt.Errorf("translate app %s: %w", appID, err)
