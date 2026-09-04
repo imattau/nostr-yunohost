@@ -389,7 +389,7 @@ func runCatalog(args []string, out, errOut io.Writer) int {
 		return 1
 	}
 	store := catalog.NewStore(policy)
-	for _, event := range client.FetchAppDeclarations(context.Background()) {
+	for _, event := range client.FetchAppDeclarations(context.Background(), policy.Publishers()) {
 		if err := store.IngestVerified(context.Background(), *event, repository.VerifyDeclaration); err != nil {
 			fmt.Fprintf(errOut, "reject %s: %v\n", event.ID, err)
 		}

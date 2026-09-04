@@ -57,7 +57,7 @@ func main() {
 	if err := store.Load(*cachePath); err != nil {
 		log.Printf("load catalogue cache: %v", err)
 	}
-	for _, event := range client.FetchAppDeclarations(ctx) {
+	for _, event := range client.FetchAppDeclarations(ctx, policy.Publishers()) {
 		if err := store.IngestVerified(ctx, *event, repository.VerifyDeclaration); err != nil {
 			log.Printf("reject event %s: %v", event.ID, err)
 			continue

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"sync"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
@@ -64,15 +65,44 @@ func (c *Client) FetchReplaceable(ctx context.Context, publisher, appID string) 
 }
 
 // FetchAppDeclarations fetches the latest declaration per publisher/app pair.
-func (c *Client) FetchAppDeclarations(ctx context.Context) []*nostr.Event {
-	results := c.pool.FetchManyReplaceable(ctx, c.urls, nostr.Filter{
-		Kinds: []int{protocol.AppDeclarationKind},
-	})
+func (c *Client) FetchAppDeclarations(ctx context.Context, publishers []string) []*nostr.Event {
+	latest := make(map[nostr.ReplaceableKey]*nostr.Event)
+	fetched := make(chan []*nostr.Event, len(c.urls))
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(len(c.urls))
+	for _, url := range c.urls {
+		go func(url string) {
+			defer waitGroup.Done()
+			relay, err := c.pool.EnsureRelay(url)
+			if err != nil {
+				fetched <- nil
+				return
+			}
+			events, err := relay.QuerySync(ctx, nostr.Filter{
+				Kinds:   []int{protocol.AppDeclarationKind},
+				Authors: publishers,
+			})
+			if err != nil {
+				fetched <- nil
+				return
+			}
+			fetched <- events
+		}(url)
+	}
+	waitGroup.Wait()
+	close(fetched)
+	for events := range fetched {
+		for _, event := range events {
+			key := nostr.ReplaceableKey{PubKey: event.PubKey, D: event.Tags.GetD()}
+			if current, ok := latest[key]; !ok || event.CreatedAt > current.CreatedAt {
+				latest[key] = event
+			}
+		}
+	}
 	events := make([]*nostr.Event, 0)
-	results.Range(func(_ nostr.ReplaceableKey, event *nostr.Event) bool {
+	for _, event := range latest {
 		events = append(events, event)
-		return true
-	})
+	}
 	return events
 }
 
