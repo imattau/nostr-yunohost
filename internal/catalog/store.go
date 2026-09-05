@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/curation"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/repository"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
 )
 
@@ -22,6 +24,108 @@ type record struct {
 	Declaration protocol.AppDeclaration
 	CreatedAt   nostr.Timestamp
 	Manifest    map[string]any
+	Logo        []byte
+	LogoHash    string
+	Branch      string
+}
+
+// selectSameSourceLatest resolves a duplicate app ID when every declaration
+// points at the same repository. Trust and repository verification have
+// already happened before records reach this point. A different repository
+// remains ambiguous and must be curated explicitly.
+func selectSameSourceLatest(candidates []record) (record, bool) {
+	if len(candidates) == 0 {
+		return record{}, false
+	}
+	repository := normalizeRepository(candidates[0].Declaration.Repository)
+	for _, candidate := range candidates[1:] {
+		if normalizeRepository(candidate.Declaration.Repository) != repository {
+			return record{}, false
+		}
+	}
+	selected := candidates[0]
+	for _, candidate := range candidates[1:] {
+		versionOrder := comparePackageVersions(candidate.Declaration.Version, selected.Declaration.Version)
+		if versionOrder > 0 || (versionOrder == 0 && newerRecord(candidate, selected)) {
+			selected = candidate
+		}
+	}
+	return selected, true
+}
+
+func normalizeRepository(repository string) string {
+	repository = strings.TrimRight(strings.TrimSpace(repository), "/")
+	return strings.TrimSuffix(repository, ".git")
+}
+
+func newerRecord(left, right record) bool {
+	if left.CreatedAt != right.CreatedAt {
+		return left.CreatedAt > right.CreatedAt
+	}
+	if left.Declaration.Publisher != right.Declaration.Publisher {
+		return left.Declaration.Publisher > right.Declaration.Publisher
+	}
+	return left.Event.ID > right.Event.ID
+}
+
+// comparePackageVersions provides the ordering needed by YunoHost versions,
+// including the commonly used ~ynh suffix. It follows Debian's useful rule
+// that '~' sorts before every other character, while comparing digit runs as
+// numbers and all other runs lexically. This keeps the core dependency-free.
+func comparePackageVersions(left, right string) int {
+	for i, j := 0, 0; i < len(left) || j < len(right); {
+		if i == len(left) {
+			return -1
+		}
+		if j == len(right) {
+			return 1
+		}
+		if left[i] == '~' || right[j] == '~' {
+			if left[i] == right[j] {
+				i++
+				j++
+				continue
+			}
+			if left[i] == '~' {
+				return -1
+			}
+			return 1
+		}
+		leftDigit, rightDigit := left[i] >= '0' && left[i] <= '9', right[j] >= '0' && right[j] <= '9'
+		if leftDigit && rightDigit {
+			leftEnd, rightEnd := i, j
+			for leftEnd < len(left) && left[leftEnd] >= '0' && left[leftEnd] <= '9' {
+				leftEnd++
+			}
+			for rightEnd < len(right) && right[rightEnd] >= '0' && right[rightEnd] <= '9' {
+				rightEnd++
+			}
+			leftRun, rightRun := strings.TrimLeft(left[i:leftEnd], "0"), strings.TrimLeft(right[j:rightEnd], "0")
+			if len(leftRun) != len(rightRun) {
+				if len(leftRun) > len(rightRun) {
+					return 1
+				}
+				return -1
+			}
+			if leftRun != rightRun {
+				if leftRun > rightRun {
+					return 1
+				}
+				return -1
+			}
+			i, j = leftEnd, rightEnd
+			continue
+		}
+		if left[i] != right[j] {
+			if left[i] > right[j] {
+				return 1
+			}
+			return -1
+		}
+		i++
+		j++
+	}
+	return 0
 }
 
 // Store keeps the latest accepted declaration for each publisher/app pair.
@@ -64,15 +168,25 @@ func (s *Store) Ingest(event nostr.Event) error {
 // IngestVerified applies trust validation and then verifies the authoritative
 // repository before adding the declaration to the store.
 func (s *Store) IngestVerified(ctx context.Context, event nostr.Event, verify func(context.Context, protocol.AppDeclaration) (map[string]any, error)) error {
+	return s.IngestVerifiedPackage(ctx, event, func(ctx context.Context, declaration protocol.AppDeclaration) (repository.VerifiedPackage, error) {
+		manifest, err := verify(ctx, declaration)
+		return repository.VerifiedPackage{Manifest: manifest}, err
+	})
+}
+
+// IngestVerifiedPackage is like IngestVerified but also retains an optional
+// verified logo for serving through the YunoHost catalogue endpoint.
+func (s *Store) IngestVerifiedPackage(ctx context.Context, event nostr.Event, verify func(context.Context, protocol.AppDeclaration) (repository.VerifiedPackage, error)) error {
 	declaration, err := s.policy.Validate(event)
 	if err != nil {
 		return err
 	}
-	manifest, err := verify(ctx, declaration)
+	verified, err := verify(ctx, declaration)
 	if err != nil {
 		return fmt.Errorf("verify repository: %w", err)
 	}
-	if _, err := Translate(declaration, manifest, int64(event.CreatedAt)); err != nil {
+	logoHash := repository.LogoHash(verified.Logo)
+	if _, err := TranslateWithBranch(declaration, verified.Manifest, logoHash, verified.Branch, int64(event.CreatedAt)); err != nil {
 		return fmt.Errorf("translate catalogue entry: %w", err)
 	}
 	key := declaration.Publisher + "\x00" + declaration.AppID
@@ -81,7 +195,7 @@ func (s *Store) IngestVerified(ctx context.Context, event nostr.Event, verify fu
 	if current, ok := s.entries[key]; ok && current.CreatedAt >= event.CreatedAt {
 		return nil
 	}
-	s.entries[key] = record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt, Manifest: manifest}
+	s.entries[key] = record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt, Manifest: verified.Manifest, Logo: verified.Logo, LogoHash: logoHash, Branch: verified.Branch}
 	return nil
 }
 
@@ -160,11 +274,15 @@ func (s *Store) Load(path string) error {
 		if entry.Manifest == nil {
 			continue
 		}
-		if _, err := Translate(declaration, entry.Manifest, int64(entry.Event.CreatedAt)); err != nil {
+		if _, err := TranslateWithBranch(declaration, entry.Manifest, entry.LogoHash, entry.Branch, int64(entry.Event.CreatedAt)); err != nil {
 			continue
 		}
 		key := declaration.Publisher + "\x00" + declaration.AppID
-		s.entries[key] = record{Event: entry.Event, Declaration: declaration, CreatedAt: entry.Event.CreatedAt, Manifest: entry.Manifest}
+		branch := entry.Branch
+		if branch == "" {
+			branch = "main"
+		}
+		s.entries[key] = record{Event: entry.Event, Declaration: declaration, CreatedAt: entry.Event.CreatedAt, Manifest: entry.Manifest, Logo: entry.Logo, LogoHash: entry.LogoHash, Branch: branch}
 	}
 	return nil
 }
@@ -210,25 +328,30 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 		if len(candidates) == 1 {
 			selected = candidates[0]
 		} else {
-			if s.curationPolicy == nil {
+			var ok bool
+			selected, ok = selectSameSourceLatest(candidates)
+			if ok {
+				// Same-source declarations are safe to resolve without curator input.
+			} else if s.curationPolicy == nil {
 				continue
-			}
-			declarations := make([]protocol.AppDeclaration, 0, len(candidates))
-			for _, candidate := range candidates {
-				declarations = append(declarations, candidate.Declaration)
-			}
-			declaration := s.curationPolicy.SelectCanonical(declarations, s.endorsements)
-			if declaration == nil {
-				continue
-			}
-			for _, candidate := range candidates {
-				if candidate.Declaration.Publisher == declaration.Publisher {
-					selected = candidate
-					break
+			} else {
+				declarations := make([]protocol.AppDeclaration, 0, len(candidates))
+				for _, candidate := range candidates {
+					declarations = append(declarations, candidate.Declaration)
+				}
+				declaration := s.curationPolicy.SelectCanonical(declarations, s.endorsements)
+				if declaration == nil {
+					continue
+				}
+				for _, candidate := range candidates {
+					if candidate.Declaration.Publisher == declaration.Publisher {
+						selected = candidate
+						break
+					}
 				}
 			}
 		}
-		app, err := Translate(selected.Declaration, selected.Manifest, int64(selected.CreatedAt))
+		app, err := TranslateWithBranch(selected.Declaration, selected.Manifest, selected.LogoHash, selected.Branch, int64(selected.CreatedAt))
 		if err != nil {
 			s.mu.RUnlock()
 			return fmt.Errorf("translate app %s: %w", appID, err)
@@ -242,4 +365,17 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 	}
 	_, err = output.Write(append(data, '\n'))
 	return err
+}
+
+// WriteLogo writes a cached verified PNG by its YunoHost logo hash.
+func (s *Store) WriteLogo(hash string, output interface{ Write([]byte) (int, error) }) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, entry := range s.entries {
+		if entry.LogoHash == hash && len(entry.Logo) > 0 {
+			_, _ = output.Write(entry.Logo)
+			return true
+		}
+	}
+	return false
 }

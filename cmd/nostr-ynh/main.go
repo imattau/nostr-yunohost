@@ -419,8 +419,8 @@ func runCatalog(args []string, out, errOut io.Writer) int {
 	fetchCtx, cancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
 	defer cancel()
 	store := catalog.NewStore(policy)
-	for _, event := range client.FetchAppDeclarations(fetchCtx) {
-		if err := store.IngestVerified(context.Background(), *event, repository.VerifyDeclaration); err != nil {
+	for _, event := range client.FetchAppDeclarations(fetchCtx, policy.Publishers()) {
+		if err := store.IngestVerifiedPackage(context.Background(), *event, repository.VerifyDeclaration); err != nil {
 			fmt.Fprintf(errOut, "reject %s: %v\n", event.ID, err)
 		}
 	}

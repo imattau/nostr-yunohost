@@ -34,7 +34,7 @@ func TestVerifyCheckedOutDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed["id"] != "hello_nostr" {
+	if parsed.Manifest["id"] != "hello_nostr" {
 		t.Fatalf("unexpected manifest: %+v", parsed)
 	}
 }

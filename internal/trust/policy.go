@@ -3,6 +3,7 @@ package trust
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -27,6 +28,16 @@ func NewExplicitPublishers(keys []string) (ExplicitPublishers, error) {
 		trusted[publicKey] = struct{}{}
 	}
 	return ExplicitPublishers{trusted: trusted}, nil
+}
+
+// Publishers returns the normalized hexadecimal publisher keys in stable order.
+func (p ExplicitPublishers) Publishers() []string {
+	keys := make([]string, 0, len(p.trusted))
+	for key := range p.trusted {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Validate verifies the event cryptographically, validates its declaration,
