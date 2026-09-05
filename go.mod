@@ -5,6 +5,7 @@ go 1.24.1
 toolchain go1.24.4
 
 require (
+	github.com/coder/websocket v1.8.12
 	github.com/nbd-wtf/go-nostr v0.52.3
 	github.com/pelletier/go-toml/v2 v2.4.3
 )
@@ -17,7 +18,6 @@ require (
 	github.com/bytedance/sonic v1.13.1 // indirect
 	github.com/bytedance/sonic/loader v0.2.4 // indirect
 	github.com/cloudwego/base64x v0.1.5 // indirect
-	github.com/coder/websocket v1.8.12 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect

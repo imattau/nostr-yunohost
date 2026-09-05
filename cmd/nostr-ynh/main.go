@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
@@ -115,7 +117,12 @@ func runPublish(args []string, out, errOut io.Writer) int {
 	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
 	dryRun := flags.Bool("dry-run", false, "build and sign the event without publishing")
 	jsonOutput := flags.Bool("json", false, "emit one machine-readable JSON result")
+	timeoutSeconds := relayTimeoutFlag(flags)
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if *timeoutSeconds <= 0 {
+		fmt.Fprintln(errOut, "timeout-seconds must be positive")
 		return 2
 	}
 	if *privateKeyFile != "" {
@@ -172,7 +179,9 @@ func runPublish(args []string, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "configure relays: %v\n", err)
 		return 1
 	}
-	results := client.Publish(context.Background(), event)
+	publishCtx, cancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
+	defer cancel()
+	results := client.Publish(publishCtx, event)
 	if *jsonOutput {
 		return writePublishJSON(out, event, address, results)
 	}
@@ -233,7 +242,12 @@ func runInspect(args []string, out, errOut io.Writer) int {
 	flags.SetOutput(errOut)
 	jsonOutput := flags.Bool("json", false, "emit machine-readable JSON")
 	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
+	timeoutSeconds := relayTimeoutFlag(flags)
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if *timeoutSeconds <= 0 {
+		fmt.Fprintln(errOut, "timeout-seconds must be positive")
 		return 2
 	}
 	if flags.NArg() != 1 {
@@ -259,7 +273,9 @@ func runInspect(args []string, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "configure relays: %v\n", err)
 		return 1
 	}
-	event, err := client.FetchReplaceable(context.Background(), pointer.PublicKey, pointer.Identifier)
+	fetchCtx, cancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
+	defer cancel()
+	event, err := client.FetchReplaceable(fetchCtx, pointer.PublicKey, pointer.Identifier)
 	if err != nil {
 		fmt.Fprintf(errOut, "fetch declaration: %v\n", err)
 		return 1
@@ -296,7 +312,12 @@ func runEndorse(args []string, out, errOut io.Writer) int {
 	privateKey := flags.String("private-key", os.Getenv("NOSTR_YNH_PRIVATE_KEY"), "curator private key")
 	privateKeyFile := flags.String("private-key-file", "", "file containing the curator private key")
 	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
+	timeoutSeconds := relayTimeoutFlag(flags)
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if *timeoutSeconds <= 0 {
+		fmt.Fprintln(errOut, "timeout-seconds must be positive")
 		return 2
 	}
 	if flags.NArg() != 1 {
@@ -355,8 +376,10 @@ func runEndorse(args []string, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "write event: %v\n", err)
 		return 1
 	}
+	publishCtx, cancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
+	defer cancel()
 	succeeded := 0
-	for _, result := range client.Publish(context.Background(), endorsement) {
+	for _, result := range client.Publish(publishCtx, endorsement) {
 		if result.Error != nil {
 			fmt.Fprintf(errOut, "%s: %v\n", result.Relay, result.Error)
 			continue
@@ -375,7 +398,12 @@ func runCatalog(args []string, out, errOut io.Writer) int {
 	flags.SetOutput(errOut)
 	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
 	trustedList := flags.String("trusted-publishers", os.Getenv("NOSTR_YNH_TRUSTED_PUBLISHERS"), "comma-separated publisher hex keys or npubs")
+	timeoutSeconds := relayTimeoutFlag(flags)
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if *timeoutSeconds <= 0 {
+		fmt.Fprintln(errOut, "timeout-seconds must be positive")
 		return 2
 	}
 	policy, err := trust.NewExplicitPublishers(splitNonEmpty(*trustedList))
@@ -388,8 +416,10 @@ func runCatalog(args []string, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "configure relays: %v\n", err)
 		return 1
 	}
+	fetchCtx, cancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
+	defer cancel()
 	store := catalog.NewStore(policy)
-	for _, event := range client.FetchAppDeclarations(context.Background()) {
+	for _, event := range client.FetchAppDeclarations(fetchCtx) {
 		if err := store.IngestVerified(context.Background(), *event, repository.VerifyDeclaration); err != nil {
 			fmt.Fprintf(errOut, "reject %s: %v\n", event.ID, err)
 		}
@@ -473,13 +503,46 @@ func splitNonEmpty(raw string) []string {
 	return values
 }
 
+// defaultRelayTimeoutSeconds bounds every relay-pool operation (fetch,
+// publish, catalog listing). The pool fans out one goroutine per relay and
+// waits for all of them (EOSE, ack, or error) before returning - a single
+// relay that never completes (unreachable, hung, or simply slow) blocks the
+// whole operation forever, since the pool has no internal deadline of its
+// own. The caller must supply a bounded context or inherit that hang -
+// previously surfaced to `catalog` callers as an external wrapper's own
+// blunt subprocess timeout, with no partial results and no way to tell a
+// slow relay from a broken one.
+const defaultRelayTimeoutSeconds = 20
+
+// relayTimeoutFlag registers the shared --timeout-seconds flag, defaulting
+// to NOSTR_YNH_TIMEOUT_SECONDS or defaultRelayTimeoutSeconds.
+func relayTimeoutFlag(flags *flag.FlagSet) *int {
+	return flags.Int("timeout-seconds", envIntOrDefault("NOSTR_YNH_TIMEOUT_SECONDS", defaultRelayTimeoutSeconds), "relay operation deadline in seconds")
+}
+
+func relayTimeout(seconds int) time.Duration {
+	return time.Duration(seconds) * time.Second
+}
+
+func envIntOrDefault(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
 func usage(out io.Writer) {
 	fmt.Fprintln(out, "usage:")
 	fmt.Fprintln(out, "  nostr-ynh verify [--json] <event.json>")
-	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex>|--private-key-file <path> --relays <ws://...,...> [--repo <path>|--repository-url <url> --ref <ref>] [--dry-run] [--json]")
-	fmt.Fprintln(out, "  nostr-ynh inspect [--json] [--relays <ws://...,...>] <naddr>")
-	fmt.Fprintln(out, "  nostr-ynh endorse [--claim recommend|tested] [--comment <text>] [--private-key <hex>|--private-key-file <path>] [--relays <ws://...,...>] <naddr>")
-	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...>")
+	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex>|--private-key-file <path> --relays <ws://...,...> [--repo <path>|--repository-url <url> --ref <ref>] [--dry-run] [--json] [--timeout-seconds <n>]")
+	fmt.Fprintln(out, "  nostr-ynh inspect [--json] [--relays <ws://...,...>] [--timeout-seconds <n>] <naddr>")
+	fmt.Fprintln(out, "  nostr-ynh endorse [--claim recommend|tested] [--comment <text>] [--private-key <hex>|--private-key-file <path>] [--relays <ws://...,...>] [--timeout-seconds <n>] <naddr>")
+	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...> [--timeout-seconds <n>]")
 	fmt.Fprintln(out, "  nostr-ynh preview [--ref <branch|tag|commit>] <repository-url>")
 	fmt.Fprintln(out, "  nostr-ynh keygen")
 	fmt.Fprintln(out, "  nostr-ynh version")
