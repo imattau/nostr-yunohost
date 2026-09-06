@@ -420,7 +420,14 @@ func runCatalog(args []string, out, errOut io.Writer) int {
 	defer cancel()
 	store := catalog.NewStore(policy)
 	for _, event := range client.FetchAppDeclarations(fetchCtx, policy.Publishers()) {
-		if err := store.IngestVerifiedPackage(context.Background(), *event, repository.VerifyDeclaration); err != nil {
+		// Each declared app gets its own fresh deadline: VerifyDeclaration
+		// clones the declared repository at the declared commit, so one
+		// slow or unreachable git host must not stall verification of
+		// every other (perfectly fine) declaration in the catalogue.
+		verifyCtx, verifyCancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
+		err := store.IngestVerifiedPackage(verifyCtx, *event, repository.VerifyDeclaration)
+		verifyCancel()
+		if err != nil {
 			fmt.Fprintf(errOut, "reject %s: %v\n", event.ID, err)
 		}
 	}
