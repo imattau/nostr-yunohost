@@ -393,17 +393,34 @@ func runEndorse(args []string, out, errOut io.Writer) int {
 	return 0
 }
 
+// defaultCatalogBudgetSeconds bounds the *entire* per-app verification loop
+// in runCatalog, not just one app's git clone. Each declared app gets its
+// own fresh --timeout-seconds deadline so one dead repo doesn't consume the
+// whole budget alone, but a catalog can have many declared apps: several
+// dead repos in a row, each burning its own full per-app timeout, can still
+// sum to more than the external caller's own timeout (e.g. the MCP
+// wrapper's 120s subprocess limit) even though every individual step is
+// correctly bounded. This overall deadline caps the sum: once it expires,
+// remaining declarations are skipped (reported, not silently dropped)
+// rather than attempted.
+const defaultCatalogBudgetSeconds = 60
+
 func runCatalog(args []string, out, errOut io.Writer) int {
 	flags := flag.NewFlagSet("catalog", flag.ContinueOnError)
 	flags.SetOutput(errOut)
 	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
 	trustedList := flags.String("trusted-publishers", os.Getenv("NOSTR_YNH_TRUSTED_PUBLISHERS"), "comma-separated publisher hex keys or npubs")
 	timeoutSeconds := relayTimeoutFlag(flags)
+	budgetSeconds := flags.Int("budget-seconds", envIntOrDefault("NOSTR_YNH_CATALOG_BUDGET_SECONDS", defaultCatalogBudgetSeconds), "total deadline in seconds for verifying every declared app; declarations past it are skipped, not attempted")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	if *timeoutSeconds <= 0 {
 		fmt.Fprintln(errOut, "timeout-seconds must be positive")
+		return 2
+	}
+	if *budgetSeconds <= 0 {
+		fmt.Fprintln(errOut, "budget-seconds must be positive")
 		return 2
 	}
 	policy, err := trust.NewExplicitPublishers(splitNonEmpty(*trustedList))
@@ -418,13 +435,22 @@ func runCatalog(args []string, out, errOut io.Writer) int {
 	}
 	fetchCtx, cancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
 	defer cancel()
+	events := client.FetchAppDeclarations(fetchCtx, policy.Publishers())
+
+	verifyBudgetCtx, verifyBudgetCancel := context.WithTimeout(context.Background(), relayTimeout(*budgetSeconds))
+	defer verifyBudgetCancel()
 	store := catalog.NewStore(policy)
-	for _, event := range client.FetchAppDeclarations(fetchCtx, policy.Publishers()) {
-		// Each declared app gets its own fresh deadline: VerifyDeclaration
-		// clones the declared repository at the declared commit, so one
-		// slow or unreachable git host must not stall verification of
-		// every other (perfectly fine) declaration in the catalogue.
-		verifyCtx, verifyCancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
+	for i, event := range events {
+		if verifyBudgetCtx.Err() != nil {
+			fmt.Fprintf(errOut, "skipping %d of %d declarations: verification budget (%ds) exhausted\n", len(events)-i, len(events), *budgetSeconds)
+			break
+		}
+		// Each declared app gets its own fresh deadline (bounded by the
+		// overall verification budget above): VerifyDeclaration clones the
+		// declared repository at the declared commit, so one slow or
+		// unreachable git host must not stall verification of every other
+		// (perfectly fine) declaration in the catalogue.
+		verifyCtx, verifyCancel := context.WithTimeout(verifyBudgetCtx, relayTimeout(*timeoutSeconds))
 		err := store.IngestVerifiedPackage(verifyCtx, *event, repository.VerifyDeclaration)
 		verifyCancel()
 		if err != nil {
@@ -549,7 +575,7 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex>|--private-key-file <path> --relays <ws://...,...> [--repo <path>|--repository-url <url> --ref <ref>] [--dry-run] [--json] [--timeout-seconds <n>]")
 	fmt.Fprintln(out, "  nostr-ynh inspect [--json] [--relays <ws://...,...>] [--timeout-seconds <n>] <naddr>")
 	fmt.Fprintln(out, "  nostr-ynh endorse [--claim recommend|tested] [--comment <text>] [--private-key <hex>|--private-key-file <path>] [--relays <ws://...,...>] [--timeout-seconds <n>] <naddr>")
-	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...> [--timeout-seconds <n>]")
+	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...> [--timeout-seconds <n>] [--budget-seconds <n>]")
 	fmt.Fprintln(out, "  nostr-ynh preview [--ref <branch|tag|commit>] <repository-url>")
 	fmt.Fprintln(out, "  nostr-ynh keygen")
 	fmt.Fprintln(out, "  nostr-ynh version")
