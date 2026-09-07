@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
 )
 
@@ -198,6 +199,19 @@ func Parse(event nostr.Event) (Attestation, error) {
 		Checks:       payload.Checks,
 		Result:       tags["result"],
 	}, nil
+}
+
+// Address encodes the attestation's identity as a shareable NIP-19 naddr,
+// mirroring publisher.AppAddress for declarations.
+func Address(event nostr.Event, relays []string) (string, error) {
+	if event.Kind != AttestationKind || !nostr.IsValidPublicKey(event.PubKey) {
+		return "", fmt.Errorf("event is not a valid attestation")
+	}
+	d := event.Tags.GetD()
+	if d == "" {
+		return "", fmt.Errorf("event has no address identifier")
+	}
+	return nip19.EncodeEntity(event.PubKey, event.Kind, d, relays)
 }
 
 func validateHash(name, raw string) error {

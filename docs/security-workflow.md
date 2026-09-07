@@ -83,6 +83,42 @@ for diagnostics. The job itself fails whenever the overall result is not
 `pass`, so callers can gate merges on it directly, independent of whether
 anyone ever runs `nostr-ynh attest` on the result.
 
+Signing and publishing are deliberately not part of this workflow: doing so
+would need a real verifier private key available to a job that also runs
+several third-party tools against a submitted repository, which is the
+opposite of what the Static CI boundary is for. A separate job (own
+workflow, protected branch/environment, real secret - the same posture as
+the existing publish action in `action.yml`) can consume the artifact:
+
+```yaml
+jobs:
+  static-security:
+    uses: nostr-yunohost/nostr-yunohost/.github/workflows/static-security.yml@main
+
+  attest:
+    needs: static-security
+    if: needs.static-security.outputs.result == 'pass'
+    runs-on: ubuntu-latest
+    environment: attestation
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ci-result
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - run: go install github.com/nostr-yunohost/nostr-yunohost/cmd/nostr-ynh@main
+      - run: |
+          "$(go env GOPATH)/bin/nostr-ynh" attest \
+            --ci-result ci-result.json \
+            --private-key "${{ secrets.NOSTR_ATTEST_PRIVATE_KEY }}" \
+            --relays wss://relay.example
+```
+
+See `docs/attestations.md` for `nostr-ynh attest`'s full usage, including
+how it auto-detects `--ci-provider`/`--ci-ref` from the GitHub Actions
+environment it runs in.
+
 ## Verification
 
 Every tool integration was checked against its actual current source

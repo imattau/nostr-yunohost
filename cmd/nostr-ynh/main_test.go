@@ -2,16 +2,21 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/verification"
 )
 
 // startBlackholeRelay starts a relay that completes the WebSocket handshake
@@ -70,5 +75,113 @@ func TestRunInspectRespectsTimeoutAgainstAHungRelay(t *testing.T) {
 
 	if elapsed > 5*time.Second {
 		t.Fatalf("runInspect blocked for %s against an unresponsive relay; want it bounded by --timeout-seconds (1s)", elapsed)
+	}
+}
+
+func writeTestCIResult(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ci-result.json")
+	body := []byte(`{
+		"schema": 1,
+		"app_id": "ditto",
+		"repository": "https://github.com/example/ditto_ynh",
+		"commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"manifest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		"content": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		"checks": {"yunohost_lint": "pass", "shellcheck": "pass"},
+		"result": "pass"
+	}`)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatalf("write CI result: %v", err)
+	}
+	return path
+}
+
+func TestRunAttestDryRunProducesValidAttestation(t *testing.T) {
+	ciResultPath := writeTestCIResult(t)
+	var stdout, stderr bytes.Buffer
+
+	code := runAttest([]string{
+		"--ci-result", ciResultPath,
+		"--ci-provider", "github-actions",
+		"--ci-ref", "https://github.com/example/ditto_ynh/actions/runs/1",
+		"--private-key", strings.Repeat("a", 64),
+		"--dry-run",
+		"--json",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runAttest exit code = %d, stderr = %s", code, stderr.String())
+	}
+
+	var response struct {
+		Event     nostr.Event `json:"event"`
+		Naddr     string      `json:"naddr"`
+		Published bool        `json:"published"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode attest output: %v (stdout=%s)", err, stdout.String())
+	}
+	if response.Published {
+		t.Fatal("dry-run reported published=true")
+	}
+	attestation, err := verification.Parse(response.Event)
+	if err != nil {
+		t.Fatalf("Parse() rejected the event runAttest produced: %v", err)
+	}
+	if attestation.AppID != "ditto" || attestation.CIProvider != "github-actions" || attestation.Result != "pass" {
+		t.Fatalf("unexpected attestation: %+v", attestation)
+	}
+	if _, _, err := nip19.Decode(response.Naddr); err != nil {
+		t.Fatalf("naddr does not decode: %v", err)
+	}
+}
+
+func TestRunAttestRequiresCIResult(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runAttest([]string{"--private-key", strings.Repeat("a", 64), "--dry-run"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runAttest exit code = %d, want 2 (usage error) for missing --ci-result", code)
+	}
+}
+
+func TestRunAttestRequiresCIProviderOutsideGitHubActions(t *testing.T) {
+	t.Setenv("GITHUB_ACTIONS", "")
+	ciResultPath := writeTestCIResult(t)
+	var stdout, stderr bytes.Buffer
+	code := runAttest([]string{"--ci-result", ciResultPath, "--private-key", strings.Repeat("a", 64), "--dry-run"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runAttest exit code = %d, want 2 (usage error) when ci-provider/ci-ref can't be determined", code)
+	}
+}
+
+func TestRunAttestAutoDetectsGitHubActionsRun(t *testing.T) {
+	t.Setenv("GITHUB_ACTIONS", "true")
+	t.Setenv("GITHUB_SERVER_URL", "https://github.com")
+	t.Setenv("GITHUB_REPOSITORY", "example/ditto_ynh")
+	t.Setenv("GITHUB_RUN_ID", "42")
+	ciResultPath := writeTestCIResult(t)
+	var stdout, stderr bytes.Buffer
+
+	code := runAttest([]string{
+		"--ci-result", ciResultPath,
+		"--private-key", strings.Repeat("a", 64),
+		"--dry-run",
+		"--json",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runAttest exit code = %d, stderr = %s", code, stderr.String())
+	}
+	var response struct {
+		Event nostr.Event `json:"event"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode attest output: %v", err)
+	}
+	attestation, err := verification.Parse(response.Event)
+	if err != nil {
+		t.Fatalf("Parse() rejected the event: %v", err)
+	}
+	if attestation.CIProvider != "github-actions" || attestation.CIRef != "https://github.com/example/ditto_ynh/actions/runs/42" {
+		t.Fatalf("unexpected auto-detected CI fields: provider=%q ref=%q", attestation.CIProvider, attestation.CIRef)
 	}
 }

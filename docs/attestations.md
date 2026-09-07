@@ -73,6 +73,32 @@ requires cross-referencing `repo`/`commit`/`manifest`/`content` against the
 matching kind-30078 event, which belongs to the daemon's ingestion path
 (Phase 5), not to parsing a single event in isolation.
 
+## Publishing an attestation
+
+`nostr-ynh attest` turns a CI result (`docs/ci-result-schema.md`) into a
+signed attestation and publishes it:
+
+```bash
+nostr-ynh attest \
+  --ci-result ci-result.json \
+  --private-key-file verifier.key \
+  --relays wss://relay.example \
+  [--ci-provider github-actions] [--ci-ref <run URL>]
+```
+
+`--ci-provider`/`--ci-ref` are only needed outside GitHub Actions: when
+`GITHUB_ACTIONS=true` is set (i.e. the command runs as a workflow step), it
+derives both from the run's own environment
+(`GITHUB_SERVER_URL`/`GITHUB_REPOSITORY`/`GITHUB_RUN_ID`), matching the
+plan's "GitHub Action -> nostr-ynh attest -> signed Nostr attestation" flow
+for package repositories that want verification automatically on release.
+`--dry-run` builds and signs the event, printing its JSON and `naddr`,
+without connecting to a relay - the same pattern `nostr-ynh publish
+--dry-run` uses.
+
+The verifier key is a separate identity from the package publisher's key -
+nothing requires the same server to both publish and verify.
+
 ## Relationship to endorsements
 
 Endorsements and attestations are structurally independent event kinds and

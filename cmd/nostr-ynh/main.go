@@ -15,12 +15,14 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip19"
 
 	"github.com/nostr-yunohost/nostr-yunohost/internal/catalog"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/ciresult"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/curation"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/publisher"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/relay"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/repository"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/verification"
 )
 
 var version = "dev"
@@ -47,6 +49,8 @@ func run(args []string, out, errOut io.Writer) int {
 		return runInspect(args[1:], out, errOut)
 	case "endorse":
 		return runEndorse(args[1:], out, errOut)
+	case "attest":
+		return runAttest(args[1:], out, errOut)
 	case "catalog":
 		return runCatalog(args[1:], out, errOut)
 	case "preview":
@@ -393,6 +397,173 @@ func runEndorse(args []string, out, errOut io.Writer) int {
 	return 0
 }
 
+// runAttest turns an unsigned CI result (internal/ciresult, produced by e.g.
+// .github/workflows/static-security.yml) into a signed kind-30080
+// attestation event (internal/verification) and publishes it. It is meant
+// to run both as a standalone step and directly inside the CI job that
+// produced the result, per docs/attestation-trust-policy-plan.md Phase 4's
+// "GitHub Action -> nostr-ynh attest -> signed Nostr attestation" flow -
+// ciProvider/ciRef default to the invoking GitHub Actions run when not
+// given explicitly, since the CI result schema itself deliberately doesn't
+// carry them (docs/ci-result-schema.md).
+func runAttest(args []string, out, errOut io.Writer) int {
+	flags := flag.NewFlagSet("attest", flag.ContinueOnError)
+	flags.SetOutput(errOut)
+	ciResultPath := flags.String("ci-result", "", "path to a ci-result.json (internal/ciresult schema)")
+	ciProvider := flags.String("ci-provider", "", "CI system that produced the result, e.g. github-actions (auto-detected on GitHub Actions)")
+	ciRef := flags.String("ci-ref", "", "CI run reference, e.g. a workflow run URL (auto-detected on GitHub Actions)")
+	privateKey := flags.String("private-key", os.Getenv("NOSTR_YNH_PRIVATE_KEY"), "verifier private key")
+	privateKeyFile := flags.String("private-key-file", "", "file containing the verifier private key")
+	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
+	dryRun := flags.Bool("dry-run", false, "build and sign the event without publishing")
+	jsonOutput := flags.Bool("json", false, "emit one machine-readable JSON result")
+	timeoutSeconds := relayTimeoutFlag(flags)
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if *timeoutSeconds <= 0 {
+		fmt.Fprintln(errOut, "timeout-seconds must be positive")
+		return 2
+	}
+	if *ciResultPath == "" {
+		fmt.Fprintln(errOut, "attest requires --ci-result <path>")
+		return 2
+	}
+	if *privateKeyFile != "" {
+		if *privateKey != "" {
+			fmt.Fprintln(errOut, "use only one of --private-key, --private-key-file, or NOSTR_YNH_PRIVATE_KEY")
+			return 2
+		}
+		data, err := os.ReadFile(*privateKeyFile)
+		if err != nil {
+			fmt.Fprintf(errOut, "read private key file: %v\n", err)
+			return 1
+		}
+		*privateKey = strings.TrimSpace(string(data))
+	}
+	if *privateKey == "" || (!*dryRun && *relayList == "") {
+		fmt.Fprintln(errOut, "attest requires --private-key (or --private-key-file/NOSTR_YNH_PRIVATE_KEY) and --relays (or NOSTR_YNH_RELAYS), unless --dry-run is used")
+		return 2
+	}
+	data, err := os.ReadFile(*ciResultPath)
+	if err != nil {
+		fmt.Fprintf(errOut, "read CI result: %v\n", err)
+		return 1
+	}
+	result, err := ciresult.Parse(data)
+	if err != nil {
+		fmt.Fprintf(errOut, "invalid CI result: %v\n", err)
+		return 1
+	}
+	provider, ref := *ciProvider, *ciRef
+	if provider == "" || ref == "" {
+		autoProvider, autoRef := githubActionsRun()
+		if provider == "" {
+			provider = autoProvider
+		}
+		if ref == "" {
+			ref = autoRef
+		}
+	}
+	if provider == "" || ref == "" {
+		fmt.Fprintln(errOut, "attest requires --ci-provider and --ci-ref (could not auto-detect a CI run)")
+		return 2
+	}
+	event, err := verification.Build(result.AppID, result.Repository, result.Commit, result.Manifest, result.Content, provider, ref, result.Checks, result.Result, *privateKey)
+	if err != nil {
+		fmt.Fprintf(errOut, "build attestation: %v\n", err)
+		return 1
+	}
+	relayURLs := splitNonEmpty(*relayList)
+	address, err := verification.Address(event, relayURLs)
+	if err != nil {
+		fmt.Fprintf(errOut, "encode attestation address: %v\n", err)
+		return 1
+	}
+	if *dryRun {
+		if *jsonOutput {
+			return writeAttestJSON(out, event, address, nil)
+		}
+		if err := json.NewEncoder(out).Encode(event); err != nil {
+			fmt.Fprintf(errOut, "write event: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(errOut, "naddr: %s\n", address)
+		return 0
+	}
+	client, err := relay.New(context.Background(), relayURLs)
+	if err != nil {
+		fmt.Fprintf(errOut, "configure relays: %v\n", err)
+		return 1
+	}
+	publishCtx, cancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
+	defer cancel()
+	results := client.Publish(publishCtx, event)
+	if *jsonOutput {
+		return writeAttestJSON(out, event, address, results)
+	}
+	if err := json.NewEncoder(out).Encode(event); err != nil {
+		fmt.Fprintf(errOut, "write event: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(errOut, "naddr: %s\n", address)
+	succeeded := 0
+	for _, result := range results {
+		if result.Error != nil {
+			fmt.Fprintf(errOut, "%s: %v\n", result.Relay, result.Error)
+			continue
+		}
+		succeeded++
+		fmt.Fprintf(errOut, "%s: published\n", result.Relay)
+	}
+	if succeeded == 0 {
+		return 1
+	}
+	return 0
+}
+
+// githubActionsRun reports the current CI provider/reference from GitHub
+// Actions' own environment, so `nostr-ynh attest` run as a workflow step
+// needs no extra flags. Returns empty strings outside GitHub Actions.
+func githubActionsRun() (provider, ref string) {
+	if os.Getenv("GITHUB_ACTIONS") != "true" {
+		return "", ""
+	}
+	server := os.Getenv("GITHUB_SERVER_URL")
+	repo := os.Getenv("GITHUB_REPOSITORY")
+	runID := os.Getenv("GITHUB_RUN_ID")
+	if server == "" || repo == "" || runID == "" {
+		return "github-actions", ""
+	}
+	return "github-actions", fmt.Sprintf("%s/%s/actions/runs/%s", server, repo, runID)
+}
+
+type attestJSONResult struct {
+	Event     nostr.Event          `json:"event"`
+	Naddr     string               `json:"naddr"`
+	Published bool                 `json:"published"`
+	Relays    []publishRelayResult `json:"relays"`
+}
+
+func writeAttestJSON(out io.Writer, event nostr.Event, address string, results []relay.PublishResult) int {
+	response := attestJSONResult{Event: event, Naddr: address, Relays: []publishRelayResult{}}
+	for _, result := range results {
+		relayResult := publishRelayResult{Relay: result.Relay, Published: result.Error == nil}
+		if result.Error != nil {
+			relayResult.Error = result.Error.Error()
+		}
+		response.Relays = append(response.Relays, relayResult)
+		response.Published = response.Published || relayResult.Published
+	}
+	if err := json.NewEncoder(out).Encode(response); err != nil {
+		return 1
+	}
+	if len(results) > 0 && !response.Published {
+		return 1
+	}
+	return 0
+}
+
 // defaultCatalogBudgetSeconds bounds the *entire* per-app verification loop
 // in runCatalog, not just one app's git clone. Each declared app gets its
 // own fresh --timeout-seconds deadline so one dead repo doesn't consume the
@@ -575,6 +746,7 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex>|--private-key-file <path> --relays <ws://...,...> [--repo <path>|--repository-url <url> --ref <ref>] [--dry-run] [--json] [--timeout-seconds <n>]")
 	fmt.Fprintln(out, "  nostr-ynh inspect [--json] [--relays <ws://...,...>] [--timeout-seconds <n>] <naddr>")
 	fmt.Fprintln(out, "  nostr-ynh endorse [--claim recommend|tested] [--comment <text>] [--private-key <hex>|--private-key-file <path>] [--relays <ws://...,...>] [--timeout-seconds <n>] <naddr>")
+	fmt.Fprintln(out, "  nostr-ynh attest --ci-result <path> [--ci-provider <name>] [--ci-ref <ref>] --private-key <hex>|--private-key-file <path> --relays <ws://...,...> [--dry-run] [--json] [--timeout-seconds <n>]")
 	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...> [--timeout-seconds <n>] [--budget-seconds <n>]")
 	fmt.Fprintln(out, "  nostr-ynh preview [--ref <branch|tag|commit>] <repository-url>")
 	fmt.Fprintln(out, "  nostr-ynh keygen")

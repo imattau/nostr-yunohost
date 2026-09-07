@@ -190,7 +190,7 @@ jobs:
           TRIVY_OUTCOME: ${{ steps.trivy.outcome }}
           WORKFLOW_SCAN_OUTCOME: ${{ steps.workflow_scan.outcome }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ci-result
