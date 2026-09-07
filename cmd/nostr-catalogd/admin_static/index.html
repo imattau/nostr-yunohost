@@ -33,6 +33,11 @@
   .check-fail::before { content: "✗ "; color: #a3231f; }
   .check-other::before { content: "· "; color: #777; }
   .exclusion { margin-top: 0.5rem; font-size: 0.85rem; color: #a3231f; }
+  .reverify-btn { font-size: 0.8rem; }
+  .reverify-result { margin-top: 0.5rem; font-size: 0.85rem; }
+  .reverify-match { color: #187a45; font-weight: 600; }
+  .reverify-mismatch { color: #a3231f; font-weight: 600; }
+  .reverify-mismatch-list { margin: 0.25rem 0 0; padding-left: 1.25rem; }
 </style>
 </head>
 <body>
@@ -96,6 +101,18 @@ function buildTrustCard(entry) {
   head.appendChild(badge);
   card.appendChild(head);
 
+  const resultBox = document.createElement("div");
+  resultBox.className = "reverify-result";
+
+  if (entry.attestations && entry.attestations.length) {
+    const reverifyButton = document.createElement("button");
+    reverifyButton.className = "reverify-btn";
+    reverifyButton.textContent = "Reverify";
+    reverifyButton.title = "Independently re-clone the repository at this commit and recompute its hashes, instead of trusting the signed attestation";
+    reverifyButton.addEventListener("click", () => reverifyEntry(entry, reverifyButton, resultBox));
+    head.appendChild(reverifyButton);
+  }
+
   const meta = document.createElement("div");
   meta.className = "trust-meta";
   meta.textContent = `Revision ${shortKey(entry.commit)} · Publisher ${shortKey(entry.publisher)} · Status: ${entry.status}`;
@@ -130,7 +147,59 @@ function buildTrustCard(entry) {
     card.appendChild(exclusion);
   }
 
+  card.appendChild(resultBox);
   return card;
+}
+
+// reverifyEntry re-checks every attestation held for one trust-card's
+// revision on demand: the server re-clones the repository fresh at the
+// attested commit and recomputes its hashes, rather than trusting the
+// signed attestation or this page's own (possibly stale, load-time)
+// RepositoryVerified/Status fields. See docs/attestations.md,
+// "Independently re-checking a published attestation".
+async function reverifyEntry(entry, button, resultBox) {
+  button.disabled = true;
+  resultBox.textContent = "Reverifying - cloning the repository fresh, this can take a few seconds...";
+  try {
+    const response = await fetch("/admin/reverify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+      body: JSON.stringify({ app_id: entry.app_id, publisher: entry.publisher_hex, commit: entry.commit }),
+    });
+    if (!response.ok) {
+      resultBox.textContent = "Reverify failed: " + (await response.text());
+      return;
+    }
+    const results = await response.json();
+    resultBox.innerHTML = "";
+    if (!results.length) {
+      resultBox.textContent = "No attestations to reverify.";
+      return;
+    }
+    for (const result of results) {
+      const line = document.createElement("div");
+      const verdict = document.createElement("span");
+      verdict.className = result.match ? "reverify-match" : "reverify-mismatch";
+      verdict.textContent = result.match ? "MATCH" : "MISMATCH";
+      line.appendChild(verdict);
+      line.appendChild(document.createTextNode(` — verifier ${shortKey(result.verifier)}, re-cloned and re-hashed just now`));
+      resultBox.appendChild(line);
+      if (!result.match && result.mismatches && result.mismatches.length) {
+        const list = document.createElement("ul");
+        list.className = "reverify-mismatch-list";
+        for (const mismatch of result.mismatches) {
+          const item = document.createElement("li");
+          item.textContent = mismatch;
+          list.appendChild(item);
+        }
+        resultBox.appendChild(list);
+      }
+    }
+  } catch (err) {
+    resultBox.textContent = "Reverify failed: " + err;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function loadTrust() {

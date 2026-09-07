@@ -15,7 +15,9 @@ import (
 	"github.com/imattau/nostr-yunohost/internal/attestation"
 	"github.com/imattau/nostr-yunohost/internal/catalog"
 	"github.com/imattau/nostr-yunohost/internal/relay"
+	"github.com/imattau/nostr-yunohost/internal/reverify"
 	"github.com/imattau/nostr-yunohost/internal/trust"
+	"github.com/imattau/nostr-yunohost/internal/verification"
 )
 
 const (
@@ -318,6 +320,160 @@ func TestHandleHistoryReturnsPublishedAttestationsMostRecentFirst(t *testing.T) 
 	}
 	if entry.AttestedAt == 0 {
 		t.Fatal("expected a non-zero attested_at timestamp")
+	}
+}
+
+func TestHandleReverifyRejectsMissingCSRF(t *testing.T) {
+	server := httptest.NewServer(newTestAdminServer(t).mux())
+	defer server.Close()
+
+	body, _ := json.Marshal(reverifyRequest{AppID: "hello_nostr", Publisher: adminTestOtherKey, Commit: "cccccccccccccccccccccccccccccccccccccccc"})
+	response, err := http.Post(server.URL+"/admin/reverify", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /admin/reverify: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 without a CSRF token, got %d", response.StatusCode)
+	}
+}
+
+func adminTestOtherPubkey(t *testing.T) string {
+	t.Helper()
+	pubkey, err := nostr.GetPublicKey(adminTestOtherKey)
+	if err != nil {
+		t.Fatalf("derive other pubkey: %v", err)
+	}
+	return pubkey
+}
+
+func postReverify(t *testing.T, server *httptest.Server, req reverifyRequest) *http.Response {
+	t.Helper()
+	client := &http.Client{}
+	attestable, err := client.Get(server.URL + "/admin/attestable")
+	if err != nil {
+		t.Fatalf("GET /admin/attestable: %v", err)
+	}
+	var csrfCookie *http.Cookie
+	for _, cookie := range attestable.Cookies() {
+		if cookie.Name == csrfCookieName {
+			csrfCookie = cookie
+		}
+	}
+	attestable.Body.Close()
+	if csrfCookie == nil {
+		t.Fatal("expected a CSRF cookie")
+	}
+	body, _ := json.Marshal(req)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/admin/reverify", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", csrfCookie.Value)
+	request.AddCookie(csrfCookie)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("POST /admin/reverify: %v", err)
+	}
+	return response
+}
+
+func TestHandleReverifyRejectsUnknownRevision(t *testing.T) {
+	server := httptest.NewServer(newTestAdminServer(t).mux())
+	defer server.Close()
+
+	// This is the case where a declaration was republished (or never
+	// existed) at this commit - the request body can only select among
+	// revisions this server already accepted into its own store, it can
+	// never name an arbitrary one.
+	response := postReverify(t, server, reverifyRequest{AppID: "hello_nostr", Publisher: adminTestOtherKey, Commit: "0000000000000000000000000000000000000000"})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for an unknown revision, got %d", response.StatusCode)
+	}
+}
+
+func TestHandleReverifyReturnsEmptyResultsWhenNoAttestationExists(t *testing.T) {
+	server := httptest.NewServer(newTestAdminServer(t).mux())
+	defer server.Close()
+
+	// The fixture declaration exists but no attestation was ever ingested
+	// for it - reverify has nothing to re-check, so this must return an
+	// empty (not missing/error) result list without attempting a clone.
+	response := postReverify(t, server, reverifyRequest{AppID: "hello_nostr", Publisher: adminTestOtherPubkey(t), Commit: "cccccccccccccccccccccccccccccccccccccccc"})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.StatusCode)
+	}
+	var results []reverify.Result
+	if err := json.NewDecoder(response.Body).Decode(&results); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected no results without any stored attestation, got %+v", results)
+	}
+}
+
+func TestHandleReverifyDetectsAnAttestationThatDoesNotMatchTheRealRepository(t *testing.T) {
+	testServer := newTestAdminServer(t)
+	// A second declaration, distinct from the shared fixture, pointing at a
+	// repository that refuses the connection immediately (127.0.0.1:1) -
+	// this must fail reverify's clone step fast and deterministically,
+	// without depending on real network access or an actual clonable repo,
+	// while still exercising the "attestation claims something the
+	// independent re-clone cannot confirm" path this endpoint exists for.
+	otherPubkey, err := nostr.GetPublicKey(adminTestOtherKey)
+	if err != nil {
+		t.Fatalf("derive other pubkey: %v", err)
+	}
+	declEvent := nostr.Event{
+		PubKey: otherPubkey, CreatedAt: 1, Kind: 30078,
+		Tags: nostr.Tags{
+			{"d", "unreachable_app"}, {"platform", "yunohost"},
+			{"repo", "https://127.0.0.1:1/unreachable_app"}, {"version", "1.0.0~ynh1"},
+			{"commit", "cccccccccccccccccccccccccccccccccccccccc"},
+			{"manifest", "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+			{"content", "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+		},
+		Content: "{}",
+	}
+	if err := declEvent.Sign(adminTestOtherKey); err != nil {
+		t.Fatalf("sign declaration: %v", err)
+	}
+	if err := testServer.store.Ingest(declEvent); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	event, err := verification.Build("unreachable_app", "https://127.0.0.1:1/unreachable_app", "cccccccccccccccccccccccccccccccccccccccc",
+		"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		"github-actions", "https://example.com/actions/runs/1",
+		map[string]string{"yunohost_lint": "pass"}, "pass", adminTestOtherKey)
+	if err != nil {
+		t.Fatalf("build attestation: %v", err)
+	}
+	if err := testServer.store.IngestAttestation(event); err != nil {
+		t.Fatalf("IngestAttestation: %v", err)
+	}
+
+	server := httptest.NewServer(testServer.mux())
+	defer server.Close()
+
+	response := postReverify(t, server, reverifyRequest{AppID: "unreachable_app", Publisher: otherPubkey, Commit: "cccccccccccccccccccccccccccccccccccccccc"})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.StatusCode)
+	}
+	var results []reverify.Result
+	if err := json.NewDecoder(response.Body).Decode(&results); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected exactly one reverify result, got %+v", results)
+	}
+	if results[0].Match {
+		t.Fatalf("expected a mismatch against a repository that was never actually cloneable: %+v", results[0])
 	}
 }
 

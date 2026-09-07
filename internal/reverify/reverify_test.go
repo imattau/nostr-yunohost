@@ -1,4 +1,4 @@
-package main
+package reverify
 
 import (
 	"context"
@@ -87,7 +87,7 @@ func TestReverifyMatchesWhenDeclarationAttestationAndRepositoryAllAgree(t *testi
 	declaration := newReverifyDeclaration(repo, commit, manifestHash, contentHash, pubkey)
 	attestation := newReverifyAttestation(repo, commit, manifestHash, contentHash, pubkey)
 
-	result := reverify(context.Background(), attestation, declaration)
+	result := Run(context.Background(), attestation, declaration)
 
 	if !result.Match {
 		t.Fatalf("expected match, got mismatches: %v", result.Mismatches)
@@ -105,7 +105,7 @@ func TestReverifyDetectsDeclarationAttestationCommitMismatch(t *testing.T) {
 	// different (unattested) commit - the case this check exists for.
 	attestation := newReverifyAttestation(repo, strings.Repeat("f", 40), manifestHash, contentHash, pubkey)
 
-	result := reverify(context.Background(), attestation, declaration)
+	result := Run(context.Background(), attestation, declaration)
 
 	if result.Match {
 		t.Fatal("expected a mismatch when declaration and attestation disagree on commit")
@@ -131,7 +131,7 @@ func TestReverifyDetectsRepositoryContentDriftFromWhatWasAttested(t *testing.T) 
 	// independent clone-and-recompute, not the signature, can catch.
 	attestation := newReverifyAttestation(repo, commit, "sha256:"+strings.Repeat("0", 64), contentHash, pubkey)
 
-	result := reverify(context.Background(), attestation, declaration)
+	result := Run(context.Background(), attestation, declaration)
 
 	if result.Match {
 		t.Fatal("expected a mismatch when the attested manifest hash does not match the real repository content")

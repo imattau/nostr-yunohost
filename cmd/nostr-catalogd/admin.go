@@ -1,16 +1,26 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/imattau/nostr-yunohost/internal/attestation"
 	"github.com/imattau/nostr-yunohost/internal/catalog"
 	"github.com/imattau/nostr-yunohost/internal/localstate"
+	"github.com/imattau/nostr-yunohost/internal/reverify"
 )
+
+// reverifyTimeout bounds the git clone reverify's /admin/reverify handler
+// runs on demand - an admin clicking the button waits synchronously for the
+// HTTP response, so this needs to be short enough not to look hung against
+// a slow or unreachable repository host, matching nostr-ynh reverify's own
+// default relay/clone timeout.
+const reverifyTimeout = 20 * time.Second
 
 //go:embed admin_static/index.html
 var adminPageHTML []byte
@@ -48,6 +58,7 @@ func (s *adminServer) mux() *http.ServeMux {
 	mux.HandleFunc("/admin/attest", s.handleAttest)
 	mux.HandleFunc("/admin/history", s.handleHistory)
 	mux.HandleFunc("/admin/trust", s.handleTrust)
+	mux.HandleFunc("/admin/reverify", s.handleReverify)
 	return mux
 }
 
@@ -210,6 +221,55 @@ func (s *adminServer) handleTrust(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(s.store.TrustEntries())
+}
+
+type reverifyRequest struct {
+	AppID     string `json:"app_id"`
+	Publisher string `json:"publisher"`
+	Commit    string `json:"commit"`
+}
+
+// handleReverify independently re-checks every CI attestation this server
+// already holds for one accepted revision, on demand: it re-clones the
+// repository fresh at the attested commit and recomputes both hashes,
+// rather than trusting the signed claim or the (possibly stale, ingestion-
+// time) RepositoryVerified/Status fields the trust dashboard otherwise
+// shows. See internal/reverify and docs/attestations.md's "Independently
+// re-checking a published attestation".
+//
+// This performs real outbound network I/O (a git clone) but only ever
+// against a repository this server already accepted into its own store -
+// the request body selects which already-trusted revision to re-check, it
+// cannot name an arbitrary repository - so the CSRF check here is the same
+// defense-in-depth as handleAttest's, not the only thing standing between
+// this and SSRF.
+func (s *adminServer) handleReverify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkCSRF(r) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	var req reverifyRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	declaration, attestations, ok := s.store.RevisionAttestations(req.AppID, req.Publisher, req.Commit)
+	if !ok {
+		http.Error(w, "not an accepted revision", http.StatusNotFound)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), reverifyTimeout)
+	defer cancel()
+	results := make([]reverify.Result, 0, len(attestations))
+	for _, a := range attestations {
+		results = append(results, reverify.Run(ctx, a, declaration))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(results)
 }
 
 // handleHistory returns every attestation this server has published,

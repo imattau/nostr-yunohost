@@ -429,8 +429,14 @@ func (s *Store) attestationsForLocked(declaration protocol.AppDeclaration) []ver
 type TrustEntry struct {
 	AppID     string `json:"app_id"`
 	Publisher string `json:"publisher"`
-	Version   string `json:"version"`
-	Commit    string `json:"commit"`
+	// PublisherHex is Publisher's raw 64-hex-character form (Publisher
+	// itself is npub-encoded for display). The admin page's reverify
+	// button needs this to look the revision back up via
+	// RevisionAttestations, which is keyed on the same raw pubkey
+	// declarations and attestations carry everywhere else.
+	PublisherHex string `json:"publisher_hex"`
+	Version      string `json:"version"`
+	Commit       string `json:"commit"`
 	// RepositoryVerified reports whether this server has independently
 	// fetched the declared repository at Commit and confirmed the manifest
 	// and content hashes match (IngestVerifiedPackage) - false for a
@@ -482,6 +488,7 @@ func (s *Store) TrustEntries() []TrustEntry {
 			entries = append(entries, TrustEntry{
 				AppID:              r.Declaration.AppID,
 				Publisher:          publisher,
+				PublisherHex:       r.Declaration.Publisher,
 				Version:            r.Declaration.Version,
 				Commit:             r.Declaration.Commit,
 				RepositoryVerified: r.Manifest != nil,
@@ -507,6 +514,25 @@ func (s *Store) TrustEntries() []TrustEntry {
 		return entries[i].Commit < entries[j].Commit
 	})
 	return entries
+}
+
+// RevisionAttestations returns one retained revision's declaration and its
+// matching attestations, exactly as TrustEntries lists them - the data the
+// admin page's reverify button needs to re-check a specific row on demand,
+// rather than trusting Status/RepositoryVerified, which only reflect the
+// snapshot taken at ingestion time and can go stale if the repository
+// changes afterward.
+func (s *Store) RevisionAttestations(appID, publisher, commit string) (protocol.AppDeclaration, []verification.Attestation, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key := publisher + "\x00" + appID
+	for _, r := range s.entries[key] {
+		if r.Declaration.Commit != commit {
+			continue
+		}
+		return r.Declaration, s.attestationsForLocked(r.Declaration), true
+	}
+	return protocol.AppDeclaration{}, nil, false
 }
 
 type cacheFile struct {

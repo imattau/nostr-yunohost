@@ -21,6 +21,7 @@ import (
 	"github.com/imattau/nostr-yunohost/internal/publisher"
 	"github.com/imattau/nostr-yunohost/internal/relay"
 	"github.com/imattau/nostr-yunohost/internal/repository"
+	"github.com/imattau/nostr-yunohost/internal/reverify"
 	"github.com/imattau/nostr-yunohost/internal/trust"
 	"github.com/imattau/nostr-yunohost/internal/verification"
 )
@@ -768,7 +769,7 @@ func runReverify(args []string, out, errOut io.Writer) int {
 
 	cloneCtx, cloneCancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
 	defer cloneCancel()
-	result := reverify(cloneCtx, attestation, declaration)
+	result := reverify.Run(cloneCtx, attestation, declaration)
 
 	if *jsonOutput {
 		if err := json.NewEncoder(out).Encode(result); err != nil {
@@ -791,71 +792,6 @@ func runReverify(args []string, out, errOut io.Writer) int {
 		fmt.Fprintf(out, "  - %s\n", mismatch)
 	}
 	return 1
-}
-
-type reverifyJSONResult struct {
-	AppID      string            `json:"app_id"`
-	Repository string            `json:"repository"`
-	Commit     string            `json:"commit"`
-	Publisher  string            `json:"publisher"`
-	Verifier   string            `json:"verifier"`
-	Result     string            `json:"result"`
-	Checks     map[string]string `json:"checks"`
-	Match      bool              `json:"match"`
-	Mismatches []string          `json:"mismatches,omitempty"`
-}
-
-// reverify cross-checks a parsed attestation against the declaration it
-// claims to cover, then re-clones the repository fresh at the attested
-// commit to recompute both hashes independently - split out from
-// runReverify so the comparison logic is testable without a live relay
-// round trip (see reverify_test.go).
-func reverify(ctx context.Context, attestation verification.Attestation, declaration protocol.AppDeclaration) reverifyJSONResult {
-	var mismatches []string
-	if declaration.AppID != attestation.AppID {
-		mismatches = append(mismatches, fmt.Sprintf("app_id: declaration=%q attestation=%q", declaration.AppID, attestation.AppID))
-	}
-	if declaration.Repository != attestation.Repository {
-		mismatches = append(mismatches, fmt.Sprintf("repository: declaration=%q attestation=%q", declaration.Repository, attestation.Repository))
-	}
-	if declaration.Commit != attestation.Commit {
-		mismatches = append(mismatches, fmt.Sprintf("commit: declaration=%q attestation=%q", declaration.Commit, attestation.Commit))
-	}
-	if declaration.ManifestHash != attestation.ManifestHash {
-		mismatches = append(mismatches, fmt.Sprintf("manifest: declaration=%q attestation=%q", declaration.ManifestHash, attestation.ManifestHash))
-	}
-	if declaration.ContentHash != attestation.ContentHash {
-		mismatches = append(mismatches, fmt.Sprintf("content: declaration=%q attestation=%q", declaration.ContentHash, attestation.ContentHash))
-	}
-
-	// Re-clone the repository fresh at the attested commit and recompute
-	// both hashes, independent of whatever the declaration/attestation
-	// events merely claim - this is what actually catches a repo rewritten
-	// after attestation. repository.VerifyDeclaration only reads
-	// Repository/Commit/ManifestHash/ContentHash off the struct, so the
-	// attestation's own claims are fed in directly rather than the
-	// declaration's, in case those two already disagree above.
-	claimed := protocol.AppDeclaration{
-		Repository:   attestation.Repository,
-		Commit:       attestation.Commit,
-		ManifestHash: attestation.ManifestHash,
-		ContentHash:  attestation.ContentHash,
-	}
-	if _, verifyErr := repository.VerifyDeclaration(ctx, claimed); verifyErr != nil {
-		mismatches = append(mismatches, fmt.Sprintf("repository content: %v", verifyErr))
-	}
-
-	return reverifyJSONResult{
-		AppID:      attestation.AppID,
-		Repository: attestation.Repository,
-		Commit:     attestation.Commit,
-		Publisher:  declaration.Publisher,
-		Verifier:   attestation.Verifier,
-		Result:     attestation.Result,
-		Checks:     attestation.Checks,
-		Match:      len(mismatches) == 0,
-		Mismatches: mismatches,
-	}
 }
 
 // defaultCatalogBudgetSeconds bounds the *entire* per-app verification loop
