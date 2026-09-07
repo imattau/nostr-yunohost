@@ -509,6 +509,74 @@ func TestTrustEntriesIncludesComputedStatus(t *testing.T) {
 	}
 }
 
+func TestWriteSnapshotRequirePolicyEnforcesMinimumAttestations(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	firstVerifier := strings.Repeat("11", 32)
+	secondVerifier := strings.Repeat("22", 32)
+	event := signedEvent(t, publisherKey, "hello_nostr")
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	store.SetAttestationPolicy(trust.AttestationPolicy{Mode: trust.AttestationRequire, MinimumAttestations: 2})
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IngestAttestation(signedAttestation(t, firstVerifier, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent)); err != nil {
+		t.Fatal(err)
+	}
+
+	oneVerifier := writeSnapshotCatalog(t, store)
+	if _, ok := oneVerifier.Apps["hello_nostr"]; ok {
+		t.Fatalf("one attestation should not satisfy minimum_attestations=2: %+v", oneVerifier.Apps)
+	}
+
+	if err := store.IngestAttestation(signedAttestation(t, secondVerifier, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent)); err != nil {
+		t.Fatal(err)
+	}
+	twoVerifiers := writeSnapshotCatalog(t, store)
+	if _, ok := twoVerifiers.Apps["hello_nostr"]; !ok {
+		t.Fatalf("two independent verifiers should satisfy minimum_attestations=2: %+v", twoVerifiers.Apps)
+	}
+	if twoVerifiers.Apps["hello_nostr"].HighQuality != true {
+		t.Fatalf("two passing attestations should also satisfy multi_verified/HighQuality: %+v", twoVerifiers.Apps["hello_nostr"])
+	}
+}
+
+func TestWriteSnapshotRequirePolicyEnforcesRequiredChecks(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	verifierKey := strings.Repeat("33", 32)
+	event := signedEvent(t, publisherKey, "hello_nostr")
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	store.SetAttestationPolicy(trust.AttestationPolicy{Mode: trust.AttestationRequire, RequiredChecks: []string{"package_check"}})
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+	// Overall result "pass", but the specifically required check is absent.
+	missingRequiredCheck := signedAttestationAt(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent, "pass", 1)
+	if err := store.IngestAttestation(missingRequiredCheck); err != nil {
+		t.Fatal(err)
+	}
+
+	excluded := writeSnapshotCatalog(t, store)
+	if _, ok := excluded.Apps["hello_nostr"]; ok {
+		t.Fatalf("an attestation missing the required check must not satisfy require: %+v", excluded.Apps)
+	}
+}
+
 func TestWriteSnapshotOffPolicyIncludesUnattestedApp(t *testing.T) {
 	// The zero-value Store (no SetAttestationPolicy call) must behave
 	// exactly as it did before this policy existed.

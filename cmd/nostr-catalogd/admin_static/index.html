@@ -122,7 +122,11 @@ function buildTrustCard(entry) {
   if (!entry.policy.accepted) {
     const exclusion = document.createElement("div");
     exclusion.className = "exclusion";
-    exclusion.textContent = `Local policy: ${entry.policy.mode || "off"}. Result: excluded from the generated YunoHost catalogue until this revision has a passing attestation.`;
+    const requirement = entry.policy.required_checks && entry.policy.required_checks.length
+      ? `every one of: ${entry.policy.required_checks.join(", ")}`
+      : "an overall passing result";
+    const minimum = entry.policy.minimum_attestations || 1;
+    exclusion.textContent = `Local policy: ${entry.policy.mode || "off"}. Requires ${minimum} independent attestation(s) with ${requirement}. Result: excluded from the generated YunoHost catalogue until this revision meets that bar.`;
     card.appendChild(exclusion);
   }
 

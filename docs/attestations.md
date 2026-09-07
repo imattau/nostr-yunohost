@@ -146,11 +146,31 @@ follow-up work, not part of this phase.
 `nostr-catalogd --attestation-policy off|prefer|require` (or
 `NOSTR_YNH_ATTESTATION_POLICY`) configures how `WriteSnapshot` uses
 `AttestationsFor`'s result for each declaration it would otherwise include.
-Default is `off`. The acceptance criterion is deliberately simple for the
-MVP: an attestation counts if its overall `result` tag is `pass` - no
-minimum count, no required-checks list, no trusted-verifier allowlist yet
-(`trust.AttestationPolicy`, `internal/trust/attestation_policy.go`
-documents these as an explicitly later extension, plan Phase 12).
+Default is `off`. By default, an attestation counts if its overall `result`
+tag is `pass` and any single acceptable attestation is enough - the
+original MVP criterion. Three flags extend this (Phase 12,
+`trust.AttestationPolicy`/`NewAttestationPolicy`,
+`internal/trust/attestation_policy.go`), each defaulting to its most
+permissive value:
+
+- `--minimum-attestations`/`NOSTR_YNH_MINIMUM_ATTESTATIONS` (default 1):
+  how many independent, acceptable attestations a revision needs before it
+  counts as `Verified`. `AttestationsFor` already dedupes to one attestation
+  per verifier for a given revision, so this really is counting independent
+  verifiers, not just events.
+- `--required-checks`/`NOSTR_YNH_REQUIRED_CHECKS` (default empty): a
+  comma-separated list of check names. When set, "acceptable" stops meaning
+  "overall result is pass" and starts meaning "every named check in this
+  attestation's own `checks` map is individually `pass`" - the attestation's
+  overall `result` is then ignored entirely. This is what lets an
+  administrator require e.g. `package_check` while treating an unrelated
+  failing check (e.g. `vulnerability_scan`) as advisory, per the plan's own
+  example.
+- `--trusted-verifiers`/`NOSTR_YNH_TRUSTED_VERIFIERS` (default empty,
+  meaning any verifier): a comma-separated allowlist of verifier hex keys
+  or npubs. An attestation from any other verifier is never counted toward
+  `Verified`, though it still appears in the security index/admin dashboard
+  as evidence - filtering happens in policy evaluation, not ingestion.
 
 | Mode | Unattested declaration | Declaration with a passing attestation |
 | --- | --- | --- |
@@ -179,9 +199,11 @@ the one WriteSnapshot ends up selecting when several publishers declare the
 same app ID - with what this server has independently verified about the
 repository (`repository_verified`), every matching attestation
 (`attestations`, the same data as the security index), and the local
-policy's verdict (`policy.mode`/`accepted`/`verified`). An excluded app
-shows `UNVERIFIED` with the policy mode and why, rather than silently
-vanishing from the page an administrator would check.
+policy's verdict (`policy.mode`/`accepted`/`verified`, plus the policy's own
+configuration echoed back as `policy.minimum_attestations`/
+`policy.required_checks` so the page can explain *why* without a second
+request). An excluded app shows `UNVERIFIED` with the policy mode and why,
+rather than silently vanishing from the page an administrator would check.
 
 This flag is unrelated to the existing `--attestation-ledger`/
 `--publisher-key-file` flags: those configure this server's own kind-30079

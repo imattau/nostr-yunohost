@@ -368,6 +368,12 @@ type TrustPolicyDecision struct {
 	Mode     trust.AttestationMode `json:"mode"`
 	Accepted bool                  `json:"accepted"`
 	Verified bool                  `json:"verified"`
+	// MinimumAttestations/RequiredChecks echo the policy's own
+	// configuration (Phase 12), not anything specific to this
+	// declaration, so the admin page can explain what Verified actually
+	// required without a second request.
+	MinimumAttestations int      `json:"minimum_attestations"`
+	RequiredChecks      []string `json:"required_checks,omitempty"`
 }
 
 // TrustEntries returns every accepted declaration's trust picture, sorted
@@ -396,9 +402,11 @@ func (s *Store) TrustEntries() []TrustEntry {
 			Status:             ComputeAttestationStatus(r.Manifest != nil, attestations),
 			Attestations:       securityEntries,
 			Policy: TrustPolicyDecision{
-				Mode:     s.attestationPolicy.Mode,
-				Accepted: decision.Accepted,
-				Verified: decision.Verified,
+				Mode:                s.attestationPolicy.Mode,
+				Accepted:            decision.Accepted,
+				Verified:            decision.Verified,
+				MinimumAttestations: s.attestationPolicy.EffectiveMinimumAttestations(),
+				RequiredChecks:      s.attestationPolicy.RequiredChecks,
 			},
 		})
 	}

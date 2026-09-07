@@ -44,6 +44,13 @@ func main() {
 	// verifier (internal/verification) affect the generated catalogue - see
 	// docs/attestation-trust-policy-plan.md Phase 6 and docs/attestations.md.
 	attestationPolicyFlag := flag.String("attestation-policy", os.Getenv("NOSTR_YNH_ATTESTATION_POLICY"), "how CI-backed attestations affect the generated catalogue: off, prefer, or require (default off)")
+	// The following three flags are the plan's Phase 12 "advanced trust
+	// policies" extension: each defaults to its most permissive value
+	// (minimum 1, no required checks, no verifier restriction), matching
+	// Phase 6's original MVP acceptance criterion exactly when left unset.
+	minimumAttestations := flag.Int("minimum-attestations", defaultMinimumAttestations(), "independent passing attestations required for an app to count as verified")
+	requiredChecksFlag := flag.String("required-checks", os.Getenv("NOSTR_YNH_REQUIRED_CHECKS"), "comma-separated check names that must individually pass in an attestation, regardless of its overall result (empty: overall result alone decides)")
+	trustedVerifiersFlag := flag.String("trusted-verifiers", os.Getenv("NOSTR_YNH_TRUSTED_VERIFIERS"), "comma-separated verifier hex keys or npubs allowed to count toward verification (empty: any verifier)")
 	flag.Parse()
 	if *versionFlag {
 		fmt.Println(version)
@@ -73,7 +80,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	store.SetAttestationPolicy(trust.AttestationPolicy{Mode: attestationMode})
+	attestationPolicy, err := trust.NewAttestationPolicy(attestationMode, *minimumAttestations, splitNonEmpty(*requiredChecksFlag), splitNonEmpty(*trustedVerifiersFlag))
+	if err != nil {
+		log.Fatal(err)
+	}
+	store.SetAttestationPolicy(attestationPolicy)
 	if err := store.Load(*cachePath); err != nil {
 		log.Printf("load catalogue cache: %v", err)
 	}
@@ -222,6 +233,19 @@ func defaultMinimumEndorsements() int {
 	value, err := strconv.Atoi(raw)
 	if err != nil || value < 1 {
 		log.Printf("invalid NOSTR_YNH_MINIMUM_ENDORSEMENTS=%q; using 1", raw)
+		return 1
+	}
+	return value
+}
+
+func defaultMinimumAttestations() int {
+	raw := strings.TrimSpace(os.Getenv("NOSTR_YNH_MINIMUM_ATTESTATIONS"))
+	if raw == "" {
+		return 1
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 {
+		log.Printf("invalid NOSTR_YNH_MINIMUM_ATTESTATIONS=%q; using 1", raw)
 		return 1
 	}
 	return value
