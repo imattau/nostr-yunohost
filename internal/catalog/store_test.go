@@ -603,6 +603,75 @@ func TestWriteSnapshotSecurityIndexOmitsUnattestedApp(t *testing.T) {
 	}
 }
 
+func TestTrustEntriesReflectsVerificationAndPolicy(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	verifierKey := strings.Repeat("d1", 32)
+	event := signedEvent(t, publisherKey, "hello_nostr")
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	store.SetAttestationPolicy(trust.AttestationPolicy{Mode: trust.AttestationRequire})
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+
+	// Before any attestation: repository-verified, but require excludes it.
+	unattested := store.TrustEntries()
+	if len(unattested) != 1 {
+		t.Fatalf("expected one trust entry, got: %+v", unattested)
+	}
+	entry := unattested[0]
+	if entry.AppID != "hello_nostr" || !entry.RepositoryVerified {
+		t.Fatalf("unexpected trust entry: %+v", entry)
+	}
+	if entry.Policy.Mode != trust.AttestationRequire || entry.Policy.Accepted || entry.Policy.Verified {
+		t.Fatalf("expected require policy to reject an unattested app: %+v", entry.Policy)
+	}
+	if len(entry.Attestations) != 0 {
+		t.Fatalf("expected no attestations yet: %+v", entry.Attestations)
+	}
+
+	passing := signedAttestation(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent)
+	if err := store.IngestAttestation(passing); err != nil {
+		t.Fatal(err)
+	}
+
+	attested := store.TrustEntries()[0]
+	if !attested.Policy.Accepted || !attested.Policy.Verified {
+		t.Fatalf("expected require policy to accept the now-attested app: %+v", attested.Policy)
+	}
+	if len(attested.Attestations) != 1 || attested.Attestations[0].Status != "verified" {
+		t.Fatalf("expected one verified attestation entry: %+v", attested.Attestations)
+	}
+}
+
+func TestTrustEntriesMarksUnverifiedRepository(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	event := signedEvent(t, publisherKey, "hello_nostr")
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	// Plain Ingest, not IngestVerified: the signature and trust-policy check
+	// pass, but the repository itself was never fetched and hashed.
+	if err := store.Ingest(event); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := store.TrustEntries()
+	if len(entries) != 1 || entries[0].RepositoryVerified {
+		t.Fatalf("expected RepositoryVerified=false for a declaration accepted via Ingest alone: %+v", entries)
+	}
+}
+
 func signedAttestation(t *testing.T, privateKey, appID, repositoryURL, commit, manifestHash, contentHash string) nostr.Event {
 	return signedAttestationAt(t, privateKey, appID, repositoryURL, commit, manifestHash, contentHash, "pass", 1)
 }

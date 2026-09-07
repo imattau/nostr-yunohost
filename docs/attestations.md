@@ -164,10 +164,24 @@ via the security index above: a passing attestation's entry has
 (`"fail"`/`"error"`) instead. There is deliberately no single boolean
 collapsing this into one verdict per app - an app can have several
 attestations (Phase 12's multiple independent verifiers), and the plan
-calls for listing the evidence, not summarizing it. Phase 9's admin UI
-(not implemented) is the still-missing surface for *why* `require` excluded
-a specific app - the security index only appears for apps that made it into
-`Apps` in the first place.
+calls for listing the evidence, not summarizing it. The security index on
+`/v3/apps.json` only appears for apps that made it into `Apps` in the first
+place - `require` excludes the whole entry, security data included.
+
+## Admin trust dashboard
+
+The reason a `require`-excluded app doesn't appear in `/v3/apps.json` at all
+is exactly what the admin page (behind `--admin-listen`/`--publisher-key-file`,
+same as the existing attestation admin page) now shows first, before its
+existing candidate-endorsement table: `GET /admin/trust`
+(`catalog.Store.TrustEntries`) lists every accepted declaration - not just
+the one WriteSnapshot ends up selecting when several publishers declare the
+same app ID - with what this server has independently verified about the
+repository (`repository_verified`), every matching attestation
+(`attestations`, the same data as the security index), and the local
+policy's verdict (`policy.mode`/`accepted`/`verified`). An excluded app
+shows `UNVERIFIED` with the policy mode and why, rather than silently
+vanishing from the page an administrator would check.
 
 This flag is unrelated to the existing `--attestation-ledger`/
 `--publisher-key-file` flags: those configure this server's own kind-30079

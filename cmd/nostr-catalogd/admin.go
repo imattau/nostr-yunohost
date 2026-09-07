@@ -47,6 +47,7 @@ func (s *adminServer) mux() *http.ServeMux {
 	mux.HandleFunc("/admin/attestable", s.handleAttestable)
 	mux.HandleFunc("/admin/attest", s.handleAttest)
 	mux.HandleFunc("/admin/history", s.handleHistory)
+	mux.HandleFunc("/admin/trust", s.handleTrust)
 	return mux
 }
 
@@ -192,6 +193,23 @@ func (s *adminServer) handleAttest(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(outcomes)
+}
+
+// handleTrust returns every accepted declaration's trust picture (Phase 9's
+// trust dashboard): what this server has verified, what CI-backed
+// attestations exist for its exact revision, and what the local policy
+// decided as a result - so an app filtered by --attestation-policy=require
+// is explained here, not silently hidden. This is a read-only view over
+// catalog.Store.TrustEntries and is separate from the candidate/attest flow
+// above, which is specifically about this server's own kind-30079
+// endorsements, not third-party kind-30080 CI attestations.
+func (s *adminServer) handleTrust(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.store.TrustEntries())
 }
 
 // handleHistory returns every attestation this server has published,

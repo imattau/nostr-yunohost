@@ -321,6 +321,52 @@ func TestHandleHistoryReturnsPublishedAttestationsMostRecentFirst(t *testing.T) 
 	}
 }
 
+func TestHandleTrustReturnsEntries(t *testing.T) {
+	server := httptest.NewServer(newTestAdminServer(t).mux())
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/admin/trust")
+	if err != nil {
+		t.Fatalf("GET /admin/trust: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.StatusCode)
+	}
+	var entries []catalog.TrustEntry
+	if err := json.NewDecoder(response.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(entries) != 1 || entries[0].AppID != "hello_nostr" {
+		t.Fatalf("unexpected trust entries: %+v", entries)
+	}
+	// newTestAdminServer ingests its fixture via plain Ingest, not
+	// IngestVerified, so the repository was never actually fetched/hashed.
+	if entries[0].RepositoryVerified {
+		t.Fatalf("expected RepositoryVerified=false for the Ingest-only fixture: %+v", entries[0])
+	}
+	if entries[0].Policy.Mode != "" {
+		t.Fatalf("expected the fixture's unconfigured attestation policy to report empty mode: %+v", entries[0].Policy)
+	}
+	if !entries[0].Policy.Accepted {
+		t.Fatalf("expected off/unconfigured policy to accept the declaration: %+v", entries[0].Policy)
+	}
+}
+
+func TestHandleTrustRejectsNonGET(t *testing.T) {
+	server := httptest.NewServer(newTestAdminServer(t).mux())
+	defer server.Close()
+
+	response, err := http.Post(server.URL+"/admin/trust", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /admin/trust: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("unexpected status: %d", response.StatusCode)
+	}
+}
+
 func TestHandleIndexServesEmbeddedPage(t *testing.T) {
 	server := httptest.NewServer(newTestAdminServer(t).mux())
 	defer server.Close()

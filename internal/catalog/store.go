@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/curation"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/repository"
@@ -331,6 +332,78 @@ func (s *Store) attestationsForLocked(declaration protocol.AppDeclaration) []ver
 	}
 	sort.Slice(matched, func(i, j int) bool { return matched[i].Verifier < matched[j].Verifier })
 	return matched
+}
+
+// TrustEntry is one accepted declaration's full trust picture: what this
+// server has independently verified about it, what attestations exist for
+// its exact revision, and what the local policy decided as a result. It
+// backs the admin trust dashboard (docs/attestation-trust-policy-plan.md
+// Phase 9) - one row per publisher/app pair, not just the one declaration
+// WriteSnapshot ends up selecting when several publishers declare the same
+// app ID, so an administrator can see every publisher's standing, not only
+// the current winner.
+type TrustEntry struct {
+	AppID     string `json:"app_id"`
+	Publisher string `json:"publisher"`
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	// RepositoryVerified reports whether this server has independently
+	// fetched the declared repository at Commit and confirmed the manifest
+	// and content hashes match (IngestVerifiedPackage) - false for a
+	// declaration accepted only via the cheaper Ingest path, which trusts
+	// the signature and trust-policy check alone.
+	RepositoryVerified bool                `json:"repository_verified"`
+	Attestations       []SecurityAppEntry  `json:"attestations"`
+	Policy             TrustPolicyDecision `json:"policy"`
+}
+
+// TrustPolicyDecision is the local policy's verdict for one TrustEntry,
+// carrying enough of trust.AttestationPolicy/AttestationDecision to explain
+// itself on the admin page without that page needing to re-derive it.
+type TrustPolicyDecision struct {
+	Mode     trust.AttestationMode `json:"mode"`
+	Accepted bool                  `json:"accepted"`
+	Verified bool                  `json:"verified"`
+}
+
+// TrustEntries returns every accepted declaration's trust picture, sorted
+// by app ID then publisher for a stable admin-page render.
+func (s *Store) TrustEntries() []TrustEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entries := make([]TrustEntry, 0, len(s.entries))
+	for _, r := range s.entries {
+		attestations := s.attestationsForLocked(r.Declaration)
+		securityEntries := make([]SecurityAppEntry, 0, len(attestations))
+		for _, a := range attestations {
+			securityEntries = append(securityEntries, NewSecurityAppEntry(a))
+		}
+		decision := s.attestationPolicy.Evaluate(attestations)
+		publisher := r.Declaration.Publisher
+		if npub, err := nip19.EncodePublicKey(r.Declaration.Publisher); err == nil {
+			publisher = npub
+		}
+		entries = append(entries, TrustEntry{
+			AppID:              r.Declaration.AppID,
+			Publisher:          publisher,
+			Version:            r.Declaration.Version,
+			Commit:             r.Declaration.Commit,
+			RepositoryVerified: r.Manifest != nil,
+			Attestations:       securityEntries,
+			Policy: TrustPolicyDecision{
+				Mode:     s.attestationPolicy.Mode,
+				Accepted: decision.Accepted,
+				Verified: decision.Verified,
+			},
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].AppID != entries[j].AppID {
+			return entries[i].AppID < entries[j].AppID
+		}
+		return entries[i].Publisher < entries[j].Publisher
+	})
+	return entries
 }
 
 type cacheFile struct {
