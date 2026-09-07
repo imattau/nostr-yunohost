@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -125,6 +126,65 @@ func TestHandleAttestableReturnsCandidateAndCSRFToken(t *testing.T) {
 	}
 }
 
+func TestHandleAttestableReusesExistingCSRFCookieRatherThanRotatingIt(t *testing.T) {
+	server := httptest.NewServer(newTestAdminServer(t).mux())
+	defer server.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("new cookie jar: %v", err)
+	}
+	client := &http.Client{Jar: jar}
+
+	first, err := client.Get(server.URL + "/admin/attestable")
+	if err != nil {
+		t.Fatalf("first GET /admin/attestable: %v", err)
+	}
+	var firstBody attestableResponse
+	if err := json.NewDecoder(first.Body).Decode(&firstBody); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	first.Body.Close()
+
+	// A second GET from the same browser (a reload, a second tab, or
+	// anything else hitting this same admin page) must not invalidate the
+	// token a page already holds - the earlier version rotated the cookie
+	// on every GET, so a token captured by an already-open tab would stop
+	// matching the cookie as soon as anything else re-fetched the page,
+	// turning the next attest click into a false "invalid CSRF token".
+	second, err := client.Get(server.URL + "/admin/attestable")
+	if err != nil {
+		t.Fatalf("second GET /admin/attestable: %v", err)
+	}
+	var secondBody attestableResponse
+	if err := json.NewDecoder(second.Body).Decode(&secondBody); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	second.Body.Close()
+
+	if firstBody.CSRFToken != secondBody.CSRFToken {
+		t.Fatalf("expected the CSRF token to stay stable across GETs, got %q then %q", firstBody.CSRFToken, secondBody.CSRFToken)
+	}
+
+	// The token from the *first* response must still work against the
+	// current cookie jar state.
+	requestBody, _ := json.Marshal(attestRequest{AppID: "hello_nostr", Publisher: adminTestOtherKey, Claim: "tested"})
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/admin/attest", bytes.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", firstBody.CSRFToken)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("POST /admin/attest: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusForbidden {
+		t.Fatal("first tab's token was rejected after a second GET rotated the cookie")
+	}
+}
+
 func TestHandleAttestRejectsMissingCSRF(t *testing.T) {
 	server := httptest.NewServer(newTestAdminServer(t).mux())
 	defer server.Close()
@@ -220,6 +280,44 @@ func TestHandleAttestRejectsInvalidClaim(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for an invalid claim, got %d", response.StatusCode)
+	}
+}
+
+func TestHandleHistoryReturnsPublishedAttestationsMostRecentFirst(t *testing.T) {
+	testServer := newTestAdminServer(t)
+	if err := testServer.ledger.Record(adminTestOtherKey, "hello_nostr", "tested", "1.0.0~ynh1"); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	server := httptest.NewServer(testServer.mux())
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/admin/history")
+	if err != nil {
+		t.Fatalf("GET /admin/history: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.StatusCode)
+	}
+	var history []struct {
+		Publisher  string `json:"publisher"`
+		AppID      string `json:"app_id"`
+		Claim      string `json:"claim"`
+		Version    string `json:"version"`
+		AttestedAt int64  `json:"attested_at"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&history); err != nil {
+		t.Fatalf("decode history: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("expected exactly one history entry, got %v", history)
+	}
+	entry := history[0]
+	if entry.AppID != "hello_nostr" || entry.Publisher != adminTestOtherKey || entry.Claim != "tested" || entry.Version != "1.0.0~ynh1" {
+		t.Fatalf("unexpected history entry: %+v", entry)
+	}
+	if entry.AttestedAt == 0 {
+		t.Fatal("expected a non-zero attested_at timestamp")
 	}
 }
 

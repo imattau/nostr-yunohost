@@ -46,6 +46,7 @@ func (s *adminServer) mux() *http.ServeMux {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/admin/attestable", s.handleAttestable)
 	mux.HandleFunc("/admin/attest", s.handleAttest)
+	mux.HandleFunc("/admin/history", s.handleHistory)
 	return mux
 }
 
@@ -58,7 +59,18 @@ func (s *adminServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(adminPageHTML)
 }
 
-func issueCSRFToken(w http.ResponseWriter) (string, error) {
+// issueCSRFToken returns the token for this browser's CSRF cookie, reusing
+// an existing valid one rather than always minting a fresh one. Rotating on
+// every GET (as an earlier version did) broke any tab that had already
+// loaded the page: a second tab, a reload, or any other request to this
+// same admin page from the same browser would silently invalidate the
+// first tab's in-memory token, turning every subsequent attest click into
+// a false "invalid CSRF token" - independent of whether that other request
+// belonged to the same person at all, since the cookie is domain-wide.
+func issueCSRFToken(w http.ResponseWriter, r *http.Request) (string, error) {
+	if cookie, err := r.Cookie(csrfCookieName); err == nil && cookie.Value != "" {
+		return cookie.Value, nil
+	}
 	token, err := randomToken()
 	if err != nil {
 		return "", err
@@ -101,7 +113,7 @@ func (s *adminServer) handleAttestable(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to load candidates", http.StatusInternalServerError)
 		return
 	}
-	token, err := issueCSRFToken(w)
+	token, err := issueCSRFToken(w, r)
 	if err != nil {
 		http.Error(w, "failed to issue CSRF token", http.StatusInternalServerError)
 		return
@@ -148,22 +160,24 @@ func (s *adminServer) handleAttest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to load candidates", http.StatusInternalServerError)
 		return
 	}
-	matched := false
-	for _, candidate := range candidates {
-		if candidate.AppID == req.AppID && candidate.Publisher == req.Publisher {
-			matched = true
+	var matched *attestation.Candidate
+	for i := range candidates {
+		if candidates[i].AppID == req.AppID && candidates[i].Publisher == req.Publisher {
+			matched = &candidates[i]
 			break
 		}
 	}
-	if !matched {
+	if matched == nil {
 		// Never sign an attestation for a target we did not independently
 		// derive ourselves - the request body names the target, but only a
 		// candidate this server computed (installed + declared by someone
-		// else) is a legitimate attestation.
+		// else) is a legitimate attestation. This also means the signed
+		// version always comes from what this server observed, never from
+		// the request body.
 		http.Error(w, "not an attestable candidate", http.StatusBadRequest)
 		return
 	}
-	results, err := s.publisher.Attest(r.Context(), req.Publisher, req.AppID, req.Claim, req.Comment)
+	results, err := s.publisher.Attest(r.Context(), req.Publisher, req.AppID, req.Claim, req.Comment, matched.Version)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("attest: %v", err), http.StatusInternalServerError)
 		return
@@ -178,4 +192,17 @@ func (s *adminServer) handleAttest(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(outcomes)
+}
+
+// handleHistory returns every attestation this server has published,
+// regardless of whether the underlying app is still installed or its
+// declaration still exists - the page's expand-on-click history view for a
+// row, and a simple audit trail independent of the current candidate list.
+func (s *adminServer) handleHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.ledger.History())
 }

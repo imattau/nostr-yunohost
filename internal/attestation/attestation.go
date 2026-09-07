@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/nostr-yunohost/nostr-yunohost/internal/catalog"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/curation"
@@ -26,7 +28,18 @@ type Candidate struct {
 	Publisher  string `json:"publisher"`
 	Repository string `json:"repository"`
 	Version    string `json:"version"`
-	Attested   bool   `json:"attested"`
+	// Attested is true only if the ledger already holds an attestation for
+	// this exact Version - a newer declared version re-surfaces the
+	// candidate with its buttons active again, since this server hasn't
+	// actually verified that version yet.
+	Attested bool `json:"attested"`
+	// AttestedVersion/AttestedAt describe the most recent attestation this
+	// server made for this publisher/app pair, regardless of whether it
+	// matches the currently declared Version - so the page can still show
+	// "last attested v0.1, now at v0.2" even once Attested goes back to
+	// false for the new version.
+	AttestedVersion string `json:"attested_version,omitempty"`
+	AttestedAt      int64  `json:"attested_at,omitempty"`
 }
 
 // Candidates cross-references locally installed apps against accepted
@@ -49,34 +62,43 @@ func Candidates(declarations []protocol.AppDeclaration, installed []localstate.I
 		if !ok || installedApp.AppID != declaration.AppID {
 			continue
 		}
-		candidates = append(candidates, Candidate{
+		candidate := Candidate{
 			AppID:      declaration.AppID,
 			Publisher:  declaration.Publisher,
 			Repository: declaration.Repository,
 			Version:    declaration.Version,
-			Attested:   ledger != nil && ledger.HasAttested(declaration.Publisher, declaration.AppID),
-		})
+		}
+		if ledger != nil {
+			candidate.Attested = ledger.HasAttested(declaration.Publisher, declaration.AppID, declaration.Version)
+			if last, ok := ledger.LatestRecord(declaration.Publisher, declaration.AppID); ok {
+				candidate.AttestedVersion = last.Version
+				candidate.AttestedAt = last.AttestedAt
+			}
+		}
+		candidates = append(candidates, candidate)
 	}
 	return candidates
 }
 
-// entryKey identifies one (curator-is-implicit, publisher, app, claim)
-// attestation this server has already made.
-type entryKey struct {
-	Publisher string `json:"publisher"`
-	AppID     string `json:"app_id"`
-	Claim     string `json:"claim"`
+// attestationRecord is one attestation this server has published, kept for
+// both the HasAttested check and the admin page's history view.
+type attestationRecord struct {
+	Publisher  string `json:"publisher"`
+	AppID      string `json:"app_id"`
+	Claim      string `json:"claim"`
+	Version    string `json:"version"`
+	AttestedAt int64  `json:"attested_at"`
 }
 
 // Ledger records which attestations this server has already published, so
-// the candidate list can hide them without depending on relay round-trip
+// the candidate list can reflect them without depending on relay round-trip
 // (curation.Policy's own dedup in Store.IngestEndorsement only fires if this
 // server's key happens to appear in someone else's trusted-curators list,
 // which is unrelated to whether *this* server already signed the event).
 type Ledger struct {
 	mu      sync.Mutex
 	path    string
-	entries []entryKey
+	entries []attestationRecord
 }
 
 // LoadLedger reads a ledger from path. A missing file starts an empty ledger.
@@ -95,31 +117,67 @@ func LoadLedger(path string) (*Ledger, error) {
 	return ledger, nil
 }
 
-// HasAttested reports whether this server has already published any
-// attestation for the given publisher/app pair, regardless of claim.
-func (l *Ledger) HasAttested(publisher, appID string) bool {
+// HasAttested reports whether this server has already published an
+// attestation for the given publisher/app/version, regardless of claim.
+func (l *Ledger) HasAttested(publisher, appID, version string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, entry := range l.entries {
-		if entry.Publisher == publisher && entry.AppID == appID {
+		if entry.Publisher == publisher && entry.AppID == appID && entry.Version == version {
 			return true
 		}
 	}
 	return false
 }
 
-// Record marks a publisher/app/claim attestation as done and persists the
-// ledger atomically, mirroring catalog.Store.Save's write pattern.
-func (l *Ledger) Record(publisher, appID, claim string) error {
+// LatestRecord returns the most recently published attestation for a
+// publisher/app pair across all versions and claims, if any.
+func (l *Ledger) LatestRecord(publisher, appID string) (attestationRecord, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	key := entryKey{Publisher: publisher, AppID: appID, Claim: claim}
+	var latest attestationRecord
+	found := false
 	for _, entry := range l.entries {
-		if entry == key {
+		if entry.Publisher != publisher || entry.AppID != appID {
+			continue
+		}
+		if !found || entry.AttestedAt > latest.AttestedAt {
+			latest = entry
+			found = true
+		}
+	}
+	return latest, found
+}
+
+// History returns every attestation this server has published, most recent
+// first, for the admin page's expand-on-click history view.
+func (l *Ledger) History() []attestationRecord {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	history := make([]attestationRecord, len(l.entries))
+	copy(history, l.entries)
+	sort.Slice(history, func(i, j int) bool { return history[i].AttestedAt > history[j].AttestedAt })
+	return history
+}
+
+// Record marks a publisher/app/claim/version attestation as done and
+// persists the ledger atomically, mirroring catalog.Store.Save's write
+// pattern.
+func (l *Ledger) Record(publisher, appID, claim, version string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, entry := range l.entries {
+		if entry.Publisher == publisher && entry.AppID == appID && entry.Claim == claim && entry.Version == version {
 			return nil
 		}
 	}
-	l.entries = append(l.entries, key)
+	l.entries = append(l.entries, attestationRecord{
+		Publisher:  publisher,
+		AppID:      appID,
+		Claim:      claim,
+		Version:    version,
+		AttestedAt: time.Now().Unix(),
+	})
 	data, err := json.Marshal(l.entries)
 	if err != nil {
 		return fmt.Errorf("encode attestation ledger: %w", err)
@@ -144,11 +202,13 @@ type Publisher struct {
 
 // Attest signs a kind-30079 endorsement for publisher/appID with claim and
 // comment and publishes it to every configured relay. It is recorded in the
-// ledger - and so disappears from future Candidates listings - only once at
-// least one relay accepted it; a total publish failure leaves the candidate
-// visible so the admin page can offer a retry instead of silently hiding a
-// signature that never actually reached the network.
-func (p *Publisher) Attest(ctx context.Context, publisher, appID, claim, comment string) ([]relay.PublishResult, error) {
+// ledger against version - and so stops showing as attestable for that
+// version in future Candidates listings, while remaining visible again once
+// a newer version is declared - only once at least one relay accepted it; a
+// total publish failure leaves the candidate visible so the admin page can
+// offer a retry instead of silently hiding a signature that never actually
+// reached the network.
+func (p *Publisher) Attest(ctx context.Context, publisher, appID, claim, comment, version string) ([]relay.PublishResult, error) {
 	event, err := curation.Build(publisher, appID, claim, comment, p.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("build endorsement: %w", err)
@@ -156,7 +216,7 @@ func (p *Publisher) Attest(ctx context.Context, publisher, appID, claim, comment
 	results := p.Client.Publish(ctx, event)
 	for _, result := range results {
 		if result.Error == nil {
-			if err := p.Ledger.Record(publisher, appID, claim); err != nil {
+			if err := p.Ledger.Record(publisher, appID, claim, version); err != nil {
 				return results, fmt.Errorf("record attestation: %w", err)
 			}
 			break

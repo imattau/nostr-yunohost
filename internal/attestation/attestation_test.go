@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -146,12 +147,43 @@ func TestCandidatesReflectsLedger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadLedger: %v", err)
 	}
-	if err := ledger.Record(other, "hello_nostr", "tested"); err != nil {
+	if err := ledger.Record(other, "hello_nostr", "tested", "1.0"); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	candidates := Candidates(declarations, installed, self, ledger)
 	if len(candidates) != 1 || !candidates[0].Attested {
 		t.Fatalf("expected the recorded candidate to show attested, got %v", candidates)
+	}
+	if candidates[0].AttestedVersion != "1.0" || candidates[0].AttestedAt == 0 {
+		t.Fatalf("expected attested version/timestamp to be surfaced, got %+v", candidates[0])
+	}
+}
+
+func TestCandidatesReattestableAfterVersionBump(t *testing.T) {
+	self := selfPublisher(t)
+	other := otherPublisher(t)
+	// The publisher has since declared a newer version than what this
+	// server attested to.
+	declarations := []protocol.AppDeclaration{
+		{AppID: "hello_nostr", Publisher: other, Repository: fakeRepoA, Version: "2.0"},
+	}
+	installed := []localstate.InstalledApp{{AppID: "hello_nostr", Repository: fakeRepoA}}
+	ledger, err := LoadLedger(filepath.Join(t.TempDir(), "ledger.json"))
+	if err != nil {
+		t.Fatalf("LoadLedger: %v", err)
+	}
+	if err := ledger.Record(other, "hello_nostr", "tested", "1.0"); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	candidates := Candidates(declarations, installed, self, ledger)
+	if len(candidates) != 1 {
+		t.Fatalf("expected exactly one candidate, got %v", candidates)
+	}
+	if candidates[0].Attested {
+		t.Fatalf("expected a newer declared version to re-surface as attestable, got %+v", candidates[0])
+	}
+	if candidates[0].AttestedVersion != "1.0" {
+		t.Fatalf("expected the prior attested version to still be reported, got %+v", candidates[0])
 	}
 }
 
@@ -161,15 +193,36 @@ func TestLedgerPersistsAcrossLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadLedger: %v", err)
 	}
-	if err := ledger.Record("pub", "app", "recommend"); err != nil {
+	if err := ledger.Record("pub", "app", "recommend", "1.0"); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	reloaded, err := LoadLedger(path)
 	if err != nil {
 		t.Fatalf("LoadLedger reload: %v", err)
 	}
-	if !reloaded.HasAttested("pub", "app") {
+	if !reloaded.HasAttested("pub", "app", "1.0") {
 		t.Fatal("expected reloaded ledger to retain the recorded attestation")
+	}
+}
+
+func TestLedgerHistoryOrdersMostRecentFirst(t *testing.T) {
+	ledger, err := LoadLedger(filepath.Join(t.TempDir(), "ledger.json"))
+	if err != nil {
+		t.Fatalf("LoadLedger: %v", err)
+	}
+	if err := ledger.Record("pub", "app", "recommend", "1.0"); err != nil {
+		t.Fatalf("Record v1.0: %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond) // AttestedAt has second resolution
+	if err := ledger.Record("pub", "app", "tested", "2.0"); err != nil {
+		t.Fatalf("Record v2.0: %v", err)
+	}
+	history := ledger.History()
+	if len(history) != 2 {
+		t.Fatalf("expected 2 history entries, got %d", len(history))
+	}
+	if history[0].Version != "2.0" || history[1].Version != "1.0" {
+		t.Fatalf("expected history most-recent-first, got %+v", history)
 	}
 }
 
@@ -187,20 +240,24 @@ func TestPublisherAttestSignsPublishesAndRecords(t *testing.T) {
 	}
 	publisher := &Publisher{Client: client, PrivateKey: selfKey, Ledger: ledger}
 
-	results, err := publisher.Attest(ctx, other, "hello_nostr", "tested", "works great")
+	results, err := publisher.Attest(ctx, other, "hello_nostr", "tested", "works great", "1.0")
 	if err != nil {
 		t.Fatalf("Attest: %v", err)
 	}
 	if len(results) != 1 || results[0].Error != nil {
 		t.Fatalf("expected one successful publish result, got %v", results)
 	}
-	if !ledger.HasAttested(other, "hello_nostr") {
+	if !ledger.HasAttested(other, "hello_nostr", "1.0") {
 		t.Fatal("expected ledger to reflect the recorded attestation")
 	}
 
-	// Attesting again for the same claim must not duplicate the ledger entry.
-	if _, err := publisher.Attest(ctx, other, "hello_nostr", "tested", "still works"); err != nil {
+	// Attesting again for the same claim/version must not duplicate the
+	// ledger entry.
+	if _, err := publisher.Attest(ctx, other, "hello_nostr", "tested", "still works", "1.0"); err != nil {
 		t.Fatalf("second Attest: %v", err)
+	}
+	if len(ledger.History()) != 1 {
+		t.Fatalf("expected the duplicate attestation not to add a second history entry, got %v", ledger.History())
 	}
 }
 
@@ -219,10 +276,10 @@ func TestPublisherAttestDoesNotRecordOnTotalPublishFailure(t *testing.T) {
 	}
 	publisher := &Publisher{Client: client, PrivateKey: selfKey, Ledger: ledger}
 
-	if _, err := publisher.Attest(ctx, other, "hello_nostr", "tested", ""); err != nil {
+	if _, err := publisher.Attest(ctx, other, "hello_nostr", "tested", "", "1.0"); err != nil {
 		t.Fatalf("Attest: %v", err)
 	}
-	if ledger.HasAttested(other, "hello_nostr") {
+	if ledger.HasAttested(other, "hello_nostr", "1.0") {
 		t.Fatal("a total publish failure must not be recorded, so the admin page can offer a retry")
 	}
 }
@@ -233,10 +290,10 @@ func TestPublisherAttestRejectsInvalidPublisher(t *testing.T) {
 		t.Fatalf("LoadLedger: %v", err)
 	}
 	publisher := &Publisher{Client: nil, PrivateKey: selfKey, Ledger: ledger}
-	if _, err := publisher.Attest(context.Background(), "not-a-pubkey", "hello_nostr", "tested", ""); err == nil {
+	if _, err := publisher.Attest(context.Background(), "not-a-pubkey", "hello_nostr", "tested", "", "1.0"); err == nil {
 		t.Fatal("expected an error for an invalid publisher key")
 	}
-	if ledger.HasAttested("not-a-pubkey", "hello_nostr") {
+	if ledger.HasAttested("not-a-pubkey", "hello_nostr", "1.0") {
 		t.Fatal("a failed build must not be recorded in the ledger")
 	}
 }
