@@ -138,6 +138,44 @@ func comparePackageVersions(left, right string) int {
 	return 0
 }
 
+// maxRevisionsPerKey bounds how many distinct-commit revisions this store
+// keeps per publisher/app pair (see upsertRevision). Far more than any
+// legitimate publisher should have pending unattested at once; it exists to
+// cap memory from a publisher that republishes many distinct commits in a
+// short window, not to model a real release cadence.
+const maxRevisionsPerKey = 10
+
+// upsertRevision inserts or updates incoming within revisions (all sharing
+// one publisher/app key), keeping every distinct commit rather than only
+// the latest - this is what lets WriteSnapshot fall back to an older,
+// already-accepted revision when the newest one isn't (yet) accepted by
+// the local attestation policy, instead of the newest always silently
+// replacing it (docs/attestation-trust-policy-plan.md Phase 11: "do not
+// let the new unverified release replace a previously trusted catalogue
+// entry"). Revisions sharing a commit are still deduplicated exactly as a
+// single-record store would: a same-commit re-publish only replaces the
+// stored copy when strictly newer. Returned slice is sorted newest-first
+// by CreatedAt and capped at maxRevisionsPerKey.
+func upsertRevision(revisions []record, incoming record) []record {
+	for i, existing := range revisions {
+		if existing.Declaration.Commit != incoming.Declaration.Commit {
+			continue
+		}
+		if existing.CreatedAt >= incoming.CreatedAt {
+			return revisions
+		}
+		revisions[i] = incoming
+		sort.Slice(revisions, func(a, b int) bool { return revisions[a].CreatedAt > revisions[b].CreatedAt })
+		return revisions
+	}
+	revisions = append(revisions, incoming)
+	sort.Slice(revisions, func(a, b int) bool { return revisions[a].CreatedAt > revisions[b].CreatedAt })
+	if len(revisions) > maxRevisionsPerKey {
+		revisions = revisions[:maxRevisionsPerKey]
+	}
+	return revisions
+}
+
 // attestationRecord pairs a stored attestation with the full signed event it
 // came from, so byVerifier dedup can compare CreatedAt the same way entries
 // does for declarations.
@@ -155,11 +193,16 @@ func attestationKey(repositoryURL, commit string) string {
 	return normalizeRepository(repositoryURL) + "\x00" + commit
 }
 
-// Store keeps the latest accepted declaration for each publisher/app pair.
+// Store keeps every recently accepted revision for each publisher/app pair
+// (see upsertRevision) - not just the latest one, so an unattested new
+// revision doesn't erase a previously accepted older one out from under
+// WriteSnapshot (Phase 11).
 type Store struct {
-	mu             sync.RWMutex
-	policy         trust.ExplicitPublishers
-	entries        map[string]record
+	mu     sync.RWMutex
+	policy trust.ExplicitPublishers
+	// entries is keyed by publisher\x00appID; each value is that pair's
+	// known revisions, newest-first.
+	entries        map[string][]record
 	curationPolicy *curation.Policy
 	endorsements   []curation.Endorsement
 	// attestations is keyed first by attestationKey(repo, commit), then by
@@ -190,7 +233,7 @@ func (s *Store) SetAttestationPolicy(policy trust.AttestationPolicy) {
 }
 
 func NewStore(policy trust.ExplicitPublishers) *Store {
-	return &Store{policy: policy, entries: make(map[string]record)}
+	return &Store{policy: policy, entries: make(map[string][]record)}
 }
 
 // Ingest validates and stores an event. Invalid or untrusted events are not
@@ -203,10 +246,7 @@ func (s *Store) Ingest(event nostr.Event) error {
 	key := declaration.Publisher + "\x00" + declaration.AppID
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if current, ok := s.entries[key]; ok && current.CreatedAt >= event.CreatedAt {
-		return nil
-	}
-	s.entries[key] = record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt}
+	s.entries[key] = upsertRevision(s.entries[key], record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt})
 	return nil
 }
 
@@ -235,12 +275,10 @@ func (s *Store) IngestVerifiedPackage(ctx context.Context, event nostr.Event, ve
 		return fmt.Errorf("translate catalogue entry: %w", err)
 	}
 	key := declaration.Publisher + "\x00" + declaration.AppID
+	incoming := record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt, Manifest: verified.Manifest, Logo: verified.Logo, LogoHash: logoHash, Branch: verified.Branch}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if current, ok := s.entries[key]; ok && current.CreatedAt >= event.CreatedAt {
-		return nil
-	}
-	s.entries[key] = record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt, Manifest: verified.Manifest, Logo: verified.Logo, LogoHash: logoHash, Branch: verified.Branch}
+	s.entries[key] = upsertRevision(s.entries[key], incoming)
 	return nil
 }
 
@@ -334,14 +372,15 @@ func (s *Store) attestationsForLocked(declaration protocol.AppDeclaration) []ver
 	return matched
 }
 
-// TrustEntry is one accepted declaration's full trust picture: what this
-// server has independently verified about it, what attestations exist for
-// its exact revision, and what the local policy decided as a result. It
-// backs the admin trust dashboard (docs/attestation-trust-policy-plan.md
-// Phase 9) - one row per publisher/app pair, not just the one declaration
-// WriteSnapshot ends up selecting when several publishers declare the same
-// app ID, so an administrator can see every publisher's standing, not only
-// the current winner.
+// TrustEntry is one accepted declaration revision's full trust picture:
+// what this server has independently verified about it, what attestations
+// exist for its exact revision, and what the local policy decided as a
+// result. It backs the admin trust dashboard (docs/attestation-trust-policy-plan.md
+// Phase 9) - one row per publisher/app/commit, not just the one revision
+// WriteSnapshot ends up selecting (which may itself not be the newest
+// revision - see Phase 11), so an administrator can see every retained
+// revision's standing, including a newer one still waiting on attestation
+// while an older one remains installable.
 type TrustEntry struct {
 	AppID     string `json:"app_id"`
 	Publisher string `json:"publisher"`
@@ -376,45 +415,51 @@ type TrustPolicyDecision struct {
 	RequiredChecks      []string `json:"required_checks,omitempty"`
 }
 
-// TrustEntries returns every accepted declaration's trust picture, sorted
-// by app ID then publisher for a stable admin-page render.
+// TrustEntries returns every retained revision's trust picture across every
+// publisher/app pair, sorted by app ID, then publisher, then newest
+// revision first, for a stable admin-page render.
 func (s *Store) TrustEntries() []TrustEntry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	entries := make([]TrustEntry, 0, len(s.entries))
-	for _, r := range s.entries {
-		attestations := s.attestationsForLocked(r.Declaration)
-		securityEntries := make([]SecurityAppEntry, 0, len(attestations))
-		for _, a := range attestations {
-			securityEntries = append(securityEntries, NewSecurityAppEntry(a))
+	var entries []TrustEntry
+	for _, revisions := range s.entries {
+		for _, r := range revisions {
+			attestations := s.attestationsForLocked(r.Declaration)
+			securityEntries := make([]SecurityAppEntry, 0, len(attestations))
+			for _, a := range attestations {
+				securityEntries = append(securityEntries, NewSecurityAppEntry(a))
+			}
+			decision := s.attestationPolicy.Evaluate(attestations)
+			publisher := r.Declaration.Publisher
+			if npub, err := nip19.EncodePublicKey(r.Declaration.Publisher); err == nil {
+				publisher = npub
+			}
+			entries = append(entries, TrustEntry{
+				AppID:              r.Declaration.AppID,
+				Publisher:          publisher,
+				Version:            r.Declaration.Version,
+				Commit:             r.Declaration.Commit,
+				RepositoryVerified: r.Manifest != nil,
+				Status:             ComputeAttestationStatus(r.Manifest != nil, attestations),
+				Attestations:       securityEntries,
+				Policy: TrustPolicyDecision{
+					Mode:                s.attestationPolicy.Mode,
+					Accepted:            decision.Accepted,
+					Verified:            decision.Verified,
+					MinimumAttestations: s.attestationPolicy.EffectiveMinimumAttestations(),
+					RequiredChecks:      s.attestationPolicy.RequiredChecks,
+				},
+			})
 		}
-		decision := s.attestationPolicy.Evaluate(attestations)
-		publisher := r.Declaration.Publisher
-		if npub, err := nip19.EncodePublicKey(r.Declaration.Publisher); err == nil {
-			publisher = npub
-		}
-		entries = append(entries, TrustEntry{
-			AppID:              r.Declaration.AppID,
-			Publisher:          publisher,
-			Version:            r.Declaration.Version,
-			Commit:             r.Declaration.Commit,
-			RepositoryVerified: r.Manifest != nil,
-			Status:             ComputeAttestationStatus(r.Manifest != nil, attestations),
-			Attestations:       securityEntries,
-			Policy: TrustPolicyDecision{
-				Mode:                s.attestationPolicy.Mode,
-				Accepted:            decision.Accepted,
-				Verified:            decision.Verified,
-				MinimumAttestations: s.attestationPolicy.EffectiveMinimumAttestations(),
-				RequiredChecks:      s.attestationPolicy.RequiredChecks,
-			},
-		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].AppID != entries[j].AppID {
 			return entries[i].AppID < entries[j].AppID
 		}
-		return entries[i].Publisher < entries[j].Publisher
+		if entries[i].Publisher != entries[j].Publisher {
+			return entries[i].Publisher < entries[j].Publisher
+		}
+		return entries[i].Commit < entries[j].Commit
 	})
 	return entries
 }
@@ -423,13 +468,14 @@ type cacheFile struct {
 	Entries []record `json:"entries"`
 }
 
-// Save persists accepted records to a local JSON cache. The write is atomic
-// within the target directory.
+// Save persists every retained revision to a local JSON cache, flattened
+// from Store.entries's per-key revision lists. The write is atomic within
+// the target directory.
 func (s *Store) Save(path string) error {
 	s.mu.RLock()
-	entries := make([]record, 0, len(s.entries))
-	for _, entry := range s.entries {
-		entries = append(entries, entry)
+	var entries []record
+	for _, revisions := range s.entries {
+		entries = append(entries, revisions...)
 	}
 	s.mu.RUnlock()
 	data, err := json.Marshal(cacheFile{Entries: entries})
@@ -450,7 +496,10 @@ func (s *Store) Save(path string) error {
 }
 
 // Load restores a cache and revalidates every stored event against the
-// current cryptographic and trust policy.
+// current cryptographic and trust policy, reconstructing each
+// publisher/app pair's full revision list (not just its newest revision) -
+// Phase 11's fallback depends on older revisions surviving a restart, not
+// only the current cache format's ability to round-trip one.
 func (s *Store) Load(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -479,7 +528,8 @@ func (s *Store) Load(path string) error {
 		if branch == "" {
 			branch = "main"
 		}
-		s.entries[key] = record{Event: entry.Event, Declaration: declaration, CreatedAt: entry.Event.CreatedAt, Manifest: entry.Manifest, Logo: entry.Logo, LogoHash: entry.LogoHash, Branch: branch}
+		incoming := record{Event: entry.Event, Declaration: declaration, CreatedAt: entry.Event.CreatedAt, Manifest: entry.Manifest, Logo: entry.Logo, LogoHash: entry.LogoHash, Branch: branch}
+		s.entries[key] = upsertRevision(s.entries[key], incoming)
 	}
 	return nil
 }
@@ -494,12 +544,19 @@ func (s *Store) Declarations() []protocol.AppDeclaration {
 	return s.Snapshot()
 }
 
-// Snapshot returns declarations in stable publisher/app order.
+// Snapshot returns the newest known revision's declaration for every
+// publisher/app pair, in stable publisher/app order - the newest, not
+// necessarily the one WriteSnapshot currently offers for install (Phase
+// 11), since this reflects what's been declared, independent of local
+// attestation policy.
 func (s *Store) Snapshot() []protocol.AppDeclaration {
 	s.mu.RLock()
 	declarations := make([]protocol.AppDeclaration, 0, len(s.entries))
-	for _, entry := range s.entries {
-		declarations = append(declarations, entry.Declaration)
+	for _, revisions := range s.entries {
+		if len(revisions) == 0 {
+			continue
+		}
+		declarations = append(declarations, revisions[0].Declaration)
 	}
 	s.mu.RUnlock()
 	sort.Slice(declarations, func(i, j int) bool {
@@ -508,6 +565,25 @@ func (s *Store) Snapshot() []protocol.AppDeclaration {
 		return left < right
 	})
 	return declarations
+}
+
+// selectAcceptedRevisionLocked picks the newest revision (revisions is
+// newest-first) that is both repository-verified (Manifest != nil) and
+// accepted by the local attestation policy for its own exact commit's
+// attestations. ok is false when no revision qualifies - including when
+// revisions is empty, or every revision is either unverified or rejected
+// by policy - matching the pre-Phase-11 behavior of simply having nothing
+// to offer for that publisher/app pair.
+func (s *Store) selectAcceptedRevisionLocked(revisions []record) (record, bool) {
+	for _, r := range revisions {
+		if r.Manifest == nil {
+			continue
+		}
+		if s.attestationPolicy.Evaluate(s.attestationsForLocked(r.Declaration)).Accepted {
+			return r, true
+		}
+	}
+	return record{}, false
 }
 
 // WriteSnapshot writes the current YunoHost v3 catalogue representation.
@@ -523,12 +599,20 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 			System:  map[string][]any{},
 		},
 	}
+	// Phase 11: for each publisher/app pair, pick the newest revision that
+	// is both repository-verified and accepted by the local attestation
+	// policy, falling back to an older one rather than to nothing when the
+	// newest revision isn't (yet) accepted - "do not let the new
+	// unverified release replace a previously trusted catalogue entry."
+	// Off/Prefer always accept, so this reduces to "pick the newest
+	// verified revision" under those modes, exactly the old behavior.
 	byAppID := make(map[string][]record)
-	for _, entry := range s.entries {
-		if entry.Manifest == nil {
+	for _, revisions := range s.entries {
+		selected, ok := s.selectAcceptedRevisionLocked(revisions)
+		if !ok {
 			continue
 		}
-		byAppID[entry.Declaration.AppID] = append(byAppID[entry.Declaration.AppID], entry)
+		byAppID[selected.Declaration.AppID] = append(byAppID[selected.Declaration.AppID], selected)
 	}
 	// Computed once for the whole snapshot rather than once per app -
 	// TrustedEndorsementCount would otherwise rebuild this same tally from
@@ -565,16 +649,11 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 				}
 			}
 		}
-		// Phase 6: under AttestationRequire, a declaration without an
-		// acceptable attestation for its exact revision is excluded from
-		// the generated catalogue entirely - discoverable via other means
-		// (e.g. Declarations/Snapshot), just not offered to the YunoHost
-		// installer. Off and Prefer always accept, so this is a no-op
-		// until an administrator opts into Require.
+		// selected is already policy-accepted (selectAcceptedRevisionLocked
+		// above); attestations is recomputed here only to populate the
+		// security index and HighQuality below, not to gate inclusion
+		// again.
 		attestations := s.attestationsForLocked(selected.Declaration)
-		if !s.attestationPolicy.Evaluate(attestations).Accepted {
-			continue
-		}
 		app, err := TranslateWithBranch(selected.Declaration, selected.Manifest, selected.LogoHash, selected.Branch, int64(selected.CreatedAt))
 		if err != nil {
 			s.mu.RUnlock()
@@ -620,10 +699,12 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 func (s *Store) WriteLogo(hash string, output interface{ Write([]byte) (int, error) }) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, entry := range s.entries {
-		if entry.LogoHash == hash && len(entry.Logo) > 0 {
-			_, _ = output.Write(entry.Logo)
-			return true
+	for _, revisions := range s.entries {
+		for _, entry := range revisions {
+			if entry.LogoHash == hash && len(entry.Logo) > 0 {
+				_, _ = output.Write(entry.Logo)
+				return true
+			}
 		}
 	}
 	return false

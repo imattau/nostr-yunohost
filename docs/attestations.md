@@ -188,16 +188,66 @@ calls for listing the evidence, not summarizing it. The security index on
 `/v3/apps.json` only appears for apps that made it into `Apps` in the first
 place - `require` excludes the whole entry, security data included.
 
+## Upgrade gating
+
+A publisher releasing a new version doesn't retroactively un-attest the old
+one, but it does mean `require` must decide what to do about a revision
+that has no attestation yet. The plan's rule (Phase 11):
+
+```text
+v1, commit ABC, attested   ->  installable
+v2, commit DEF, unattested ->  discovered, not offered
+
+v1 stays the installable revision until DEF is itself attested, then the
+catalogue advances to v2.
+```
+
+`Store` keeps every recently seen distinct-commit revision per
+publisher/app pair (`upsertRevision`, capped at 10 revisions), not just the
+latest. `WriteSnapshot` picks the *newest revision that is both
+repository-verified and accepted by the local attestation policy*
+(`selectAcceptedRevisionLocked`), falling back through older revisions
+rather than to nothing when the newest one isn't (yet) accepted. Under
+`off`/`prefer` (which always accept), this reduces to "pick the newest
+verified revision" - unchanged from before this existed. Only `require`
+actually exercises the fallback.
+
+This was a real gap until it was verified end-to-end and fixed: the
+original `require` implementation (Phases 6-10) filtered only at the
+`/v3/apps.json`-generation step, but the underlying declaration store kept
+just one record per publisher/app pair, unconditionally overwritten by
+whatever arrived most recently - so an unattested v2 didn't just fail to
+be offered, it *erased v1 from the store entirely*, and the app vanished
+from the catalogue rather than staying pinned to v1. Fixed by keeping a
+bounded revision history instead of a single latest record.
+
+`Snapshot`/`Declarations` (and so `attestation.Candidates`'s
+installed-app matching) deliberately still report each pair's *newest*
+revision regardless of attestation status - discovery stays independent of
+installability (Phase 7). Only `WriteSnapshot`'s per-app selection applies
+the fallback.
+
+**Interacts with the known persistence gap above:** since attestations
+themselves aren't persisted across a daemon restart (only declarations
+are), a restart under `require` currently loses every revision's
+attestation evidence at once - the fallback still works logically (an older
+revision without an attestation is excluded exactly like a newer one
+without one), but until that gap is fixed, a restart can transiently
+exclude an app that was previously attested and installable, not just fail
+to advance past it.
+
 ## Admin trust dashboard
 
 The reason a `require`-excluded app doesn't appear in `/v3/apps.json` at all
 is exactly what the admin page (behind `--admin-listen`/`--publisher-key-file`,
 same as the existing attestation admin page) now shows first, before its
 existing candidate-endorsement table: `GET /admin/trust`
-(`catalog.Store.TrustEntries`) lists every accepted declaration - not just
-the one WriteSnapshot ends up selecting when several publishers declare the
-same app ID - with what this server has independently verified about the
-repository (`repository_verified`), every matching attestation
+(`catalog.Store.TrustEntries`) lists every retained revision of every
+accepted declaration - not just the one WriteSnapshot ends up selecting,
+whether that's because several publishers declare the same app ID or
+because a newer revision is sitting unattested behind an older installable
+one (see Upgrade gating above) - with what this server has independently
+verified about the repository (`repository_verified`), every matching attestation
 (`attestations`, the same data as the security index), and the local
 policy's verdict (`policy.mode`/`accepted`/`verified`, plus the policy's own
 configuration echoed back as `policy.minimum_attestations`/

@@ -743,6 +743,225 @@ func TestWriteSnapshotSecurityIndexOmitsUnattestedApp(t *testing.T) {
 	}
 }
 
+// TestWriteSnapshotDoesNotAdvanceToUnattestedUpgrade is Phase 11's own
+// worked example (docs/attestation-trust-policy-plan.md): v1 is attested
+// and installable; v2 (a new commit, newer version, newer CreatedAt) then
+// arrives without an attestation. Under require, the catalogue must keep
+// offering v1 - not disappear, and not silently advance to v2 - until v2
+// itself becomes attested, at which point the catalogue advances.
+func TestWriteSnapshotDoesNotAdvanceToUnattestedUpgrade(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	verifierKey := strings.Repeat("9", 64)
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	store.SetAttestationPolicy(trust.AttestationPolicy{Mode: trust.AttestationRequire})
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+
+	v1 := signedEventWith(t, publisherKey, "hello_nostr", "https://github.com/example/app_ynh", "1.0.0~ynh1", 1)
+	if err := store.IngestVerified(context.Background(), v1, verify); err != nil {
+		t.Fatal(err)
+	}
+	v1Attestation := signedAttestation(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent)
+	if err := store.IngestAttestation(v1Attestation); err != nil {
+		t.Fatal(err)
+	}
+	before := writeSnapshotCatalog(t, store)
+	if got := before.Apps["hello_nostr"].Git.Revision; got != testDeclarationCommit {
+		t.Fatalf("expected v1's commit before v2 arrives, got %q", got)
+	}
+
+	v2Commit := strings.Repeat("d", 40)
+	v2Manifest := "sha256:" + strings.Repeat("2", 64)
+	v2Content := "sha256:" + strings.Repeat("3", 64)
+	v2 := nostr.Event{
+		PubKey: publisher, CreatedAt: 2, Kind: 30078,
+		Tags: nostr.Tags{
+			{"d", "hello_nostr"}, {"platform", "yunohost"},
+			{"repo", "https://github.com/example/app_ynh"}, {"version", "2.0.0~ynh1"},
+			{"commit", v2Commit}, {"manifest", v2Manifest}, {"content", v2Content},
+		},
+		Content: "{}",
+	}
+	if err := v2.Sign(publisherKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IngestVerified(context.Background(), v2, verify); err != nil {
+		t.Fatal(err)
+	}
+
+	afterUnattestedV2 := writeSnapshotCatalog(t, store)
+	app, ok := afterUnattestedV2.Apps["hello_nostr"]
+	if !ok {
+		t.Fatal("v1 must remain in the catalogue while v2 is unattested, not disappear")
+	}
+	if app.Git.Revision != testDeclarationCommit || app.Manifest["version"] != "1.0.0~ynh1" {
+		t.Fatalf("catalogue must stay pinned to v1, not silently advance to unattested v2: %+v", app)
+	}
+
+	v2Attestation := signedAttestation(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", v2Commit, v2Manifest, v2Content)
+	if err := store.IngestAttestation(v2Attestation); err != nil {
+		t.Fatal(err)
+	}
+	afterAttestedV2 := writeSnapshotCatalog(t, store)
+	if got := afterAttestedV2.Apps["hello_nostr"].Git.Revision; got != v2Commit {
+		t.Fatalf("catalogue should advance to v2 once it is attested, got revision %q", got)
+	}
+}
+
+func TestSnapshotReturnsNewestRevisionRegardlessOfAttestation(t *testing.T) {
+	// Snapshot/Declarations reflect what's been declared, not what the
+	// local attestation policy currently offers for install - discovery
+	// stays independent of installability (plan Phase 7).
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	store.SetAttestationPolicy(trust.AttestationPolicy{Mode: trust.AttestationRequire})
+	v1 := signedEventWith(t, publisherKey, "hello_nostr", "https://github.com/example/app_ynh", "1.0.0~ynh1", 1)
+	if err := store.Ingest(v1); err != nil {
+		t.Fatal(err)
+	}
+	v2 := nostr.Event{
+		PubKey: publisher, CreatedAt: 2, Kind: 30078,
+		Tags: nostr.Tags{
+			{"d", "hello_nostr"}, {"platform", "yunohost"},
+			{"repo", "https://github.com/example/app_ynh"}, {"version", "2.0.0~ynh1"},
+			{"commit", strings.Repeat("d", 40)}, {"manifest", "sha256:" + strings.Repeat("2", 64)}, {"content", "sha256:" + strings.Repeat("3", 64)},
+		},
+		Content: "{}",
+	}
+	if err := v2.Sign(publisherKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Ingest(v2); err != nil {
+		t.Fatal(err)
+	}
+
+	declarations := store.Snapshot()
+	if len(declarations) != 1 || declarations[0].Version != "2.0.0~ynh1" {
+		t.Fatalf("Snapshot should report the newest declared revision regardless of attestation status: %+v", declarations)
+	}
+}
+
+func TestUpsertRevisionDedupesSameCommitKeepingNewer(t *testing.T) {
+	older := record{Declaration: protocol.AppDeclaration{Commit: "abc"}, CreatedAt: 1}
+	newer := record{Declaration: protocol.AppDeclaration{Commit: "abc"}, CreatedAt: 2}
+
+	revisions := upsertRevision(nil, older)
+	revisions = upsertRevision(revisions, newer)
+	if len(revisions) != 1 || revisions[0].CreatedAt != 2 {
+		t.Fatalf("expected the same commit to dedupe to its newer record, got: %+v", revisions)
+	}
+
+	// A stale re-delivery of the older event must not un-update it.
+	revisions = upsertRevision(revisions, older)
+	if len(revisions) != 1 || revisions[0].CreatedAt != 2 {
+		t.Fatalf("an older re-delivery of the same commit must not overwrite the newer record: %+v", revisions)
+	}
+}
+
+func TestUpsertRevisionKeepsDistinctCommitsNewestFirst(t *testing.T) {
+	v1 := record{Declaration: protocol.AppDeclaration{Commit: "v1"}, CreatedAt: 1}
+	v2 := record{Declaration: protocol.AppDeclaration{Commit: "v2"}, CreatedAt: 2}
+	v3 := record{Declaration: protocol.AppDeclaration{Commit: "v3"}, CreatedAt: 3}
+
+	revisions := upsertRevision(nil, v1)
+	revisions = upsertRevision(revisions, v3)
+	revisions = upsertRevision(revisions, v2)
+
+	if len(revisions) != 3 {
+		t.Fatalf("expected all three distinct commits retained, got: %+v", revisions)
+	}
+	if revisions[0].Declaration.Commit != "v3" || revisions[1].Declaration.Commit != "v2" || revisions[2].Declaration.Commit != "v1" {
+		t.Fatalf("expected revisions sorted newest-first, got: %+v", revisions)
+	}
+}
+
+func TestUpsertRevisionCapsAtMaxRevisionsPerKey(t *testing.T) {
+	var revisions []record
+	for i := 0; i < maxRevisionsPerKey+5; i++ {
+		revisions = upsertRevision(revisions, record{
+			Declaration: protocol.AppDeclaration{Commit: strings.Repeat(string(rune('a'+i)), 4)},
+			CreatedAt:   nostr.Timestamp(i),
+		})
+	}
+	if len(revisions) != maxRevisionsPerKey {
+		t.Fatalf("expected the revision list capped at %d, got %d", maxRevisionsPerKey, len(revisions))
+	}
+	// The cap must keep the newest, not the oldest.
+	if revisions[0].CreatedAt != nostr.Timestamp(maxRevisionsPerKey+4) {
+		t.Fatalf("expected the cap to retain the newest revisions, got newest CreatedAt=%d", revisions[0].CreatedAt)
+	}
+}
+
+func TestStoreCacheRoundTripPreservesMultipleRevisions(t *testing.T) {
+	// Scoped to what Save/Load themselves are responsible for: every
+	// distinct revision surviving the round-trip. This deliberately uses
+	// Declarations/Snapshot, not WriteSnapshot under require - whether an
+	// attested v1 stays selectable after a restart also depends on
+	// attestations surviving the restart, which they currently don't
+	// (a separate, already-documented gap in docs/attestations.md; see
+	// TestWriteSnapshotDoesNotAdvanceToUnattestedUpgrade for the
+	// require-mode fallback behavior this store.go change fixes, exercised
+	// within a single process where that gap doesn't apply).
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	v1 := signedEventWith(t, publisherKey, "hello_nostr", "https://github.com/example/app_ynh", "1.0.0~ynh1", 1)
+	if err := store.IngestVerified(context.Background(), v1, verify); err != nil {
+		t.Fatal(err)
+	}
+	v2 := nostr.Event{
+		PubKey: publisher, CreatedAt: 2, Kind: 30078,
+		Tags: nostr.Tags{
+			{"d", "hello_nostr"}, {"platform", "yunohost"},
+			{"repo", "https://github.com/example/app_ynh"}, {"version", "2.0.0~ynh1"},
+			{"commit", strings.Repeat("d", 40)}, {"manifest", "sha256:" + strings.Repeat("2", 64)}, {"content", "sha256:" + strings.Repeat("3", 64)},
+		},
+		Content: "{}",
+	}
+	if err := v2.Sign(publisherKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IngestVerified(context.Background(), v2, verify); err != nil {
+		t.Fatal(err)
+	}
+
+	cachePath := filepath.Join(t.TempDir(), "catalogue.json")
+	if err := store.Save(cachePath); err != nil {
+		t.Fatal(err)
+	}
+	restored := NewStore(policy)
+	if err := restored.Load(cachePath); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := restored.TrustEntries()
+	if len(entries) != 2 {
+		t.Fatalf("expected both revisions to survive the cache round-trip, got: %+v", entries)
+	}
+	commits := map[string]bool{entries[0].Commit: true, entries[1].Commit: true}
+	if !commits[testDeclarationCommit] || !commits[strings.Repeat("d", 40)] {
+		t.Fatalf("expected both v1 and v2 commits present after restore, got: %+v", commits)
+	}
+}
+
 func TestTrustEntriesReflectsVerificationAndPolicy(t *testing.T) {
 	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	verifierKey := strings.Repeat("d1", 32)
