@@ -5,10 +5,11 @@ import (
 	"testing"
 
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/verification"
 )
 
 func TestYunoHostCatalogHasVersionedSecurityIndex(t *testing.T) {
-	catalogue := YunoHostCatalog{Security: SecurityIndex{Version: 1, Apps: map[string][]any{}, System: map[string][]any{}}}
+	catalogue := YunoHostCatalog{Security: SecurityIndex{Version: 1, Apps: map[string][]SecurityAppEntry{}, System: map[string][]any{}}}
 	data, err := json.Marshal(catalogue)
 	if err != nil {
 		t.Fatal(err)
@@ -45,5 +46,32 @@ func TestTranslateRejectsManifestMismatch(t *testing.T) {
 	declaration := protocol.AppDeclaration{AppID: "hello_nostr", Version: "1.0.0~ynh1"}
 	if _, err := Translate(declaration, map[string]any{"id": "other", "version": "1.0.0~ynh1"}, 123); err == nil {
 		t.Fatal("Translate() accepted a mismatched manifest")
+	}
+}
+
+func TestComputeAttestationStatus(t *testing.T) {
+	pass := verification.Attestation{Result: "pass"}
+	fail := verification.Attestation{Result: "fail"}
+
+	cases := []struct {
+		name               string
+		repositoryVerified bool
+		attestations       []verification.Attestation
+		want               AttestationStatus
+	}{
+		{"unverified repository, no attestations", false, nil, StatusUnverified},
+		{"unverified repository, even with a passing attestation", false, []verification.Attestation{pass}, StatusUnverified},
+		{"verified repository, no attestations", true, nil, StatusIntegrityVerified},
+		{"verified repository, one passing attestation", true, []verification.Attestation{pass}, StatusCIVerified},
+		{"verified repository, two passing attestations", true, []verification.Attestation{pass, pass}, StatusMultiVerified},
+		{"verified repository, only failing attestations", true, []verification.Attestation{fail}, StatusFailed},
+		{"verified repository, mixed results still counts the pass", true, []verification.Attestation{fail, pass}, StatusCIVerified},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ComputeAttestationStatus(c.repositoryVerified, c.attestations); got != c.want {
+				t.Fatalf("ComputeAttestationStatus() = %q, want %q", got, c.want)
+			}
+		})
 	}
 }

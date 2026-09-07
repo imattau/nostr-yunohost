@@ -86,6 +86,7 @@ because it received an older event or an older package version. Version
 ordering must use YunoHost/Debian version semantics rather than lexical string
 comparison.
 
-Release history, endorsements, CI attestations, and key-rotation events are
-out of scope for the first event implementation, but the schema leaves room
-for them as separate event types.
+Release history and key-rotation events remain out of scope for the first
+event implementation, but the schema leaves room for them as separate event
+types. Endorsements (kind 30079) and CI attestations (kind 30080) are now
+specified separately - see `docs/endorsements.md` and `docs/attestations.md`.

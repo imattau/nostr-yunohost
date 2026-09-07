@@ -17,9 +17,29 @@
   .history-row td { background: #fafafa; padding: 0.5rem 1rem; }
   .history-row table { margin-top: 0; }
   .history-row th, .history-row td { padding: 0.25rem 0.5rem; border-bottom: 1px solid #eee; }
+  .trust-card { border: 1px solid #ddd; border-radius: 6px; padding: 0.75rem 1rem; margin-top: 0.75rem; }
+  .trust-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+  .trust-head h3 { margin: 0; font-size: 1rem; }
+  .trust-meta { font-size: 0.8rem; color: #777; }
+  .badge { display: inline-block; font-size: 0.75rem; font-weight: 600; padding: 0.1rem 0.5rem; border-radius: 999px; }
+  .badge-verified { background: #e6f7ee; color: #187a45; }
+  .badge-unverified { background: #fbeaea; color: #a3231f; }
+  .badge-informational { background: #eee; color: #555; }
+  .attestation-block { margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #eee; }
+  .attestation-block:first-of-type { border-top: none; }
+  .checks { list-style: none; padding: 0; margin: 0.25rem 0 0; font-size: 0.85rem; }
+  .checks li { padding: 0.1rem 0; }
+  .check-pass::before { content: "✓ "; color: #187a45; }
+  .check-fail::before { content: "✗ "; color: #a3231f; }
+  .check-other::before { content: "· "; color: #777; }
+  .exclusion { margin-top: 0.5rem; font-size: 0.85rem; color: #a3231f; }
 </style>
 </head>
 <body>
+<h1>Trust dashboard</h1>
+<p>Every declared app this server has accepted, what it has independently verified about the repository, what CI-backed attestations exist for its exact revision, and what the local attestation policy decided as a result - so a package the policy excludes is explained here, not silently hidden.</p>
+<div id="trust"></div>
+
 <h1>Apps you could attest to</h1>
 <p>These are apps installed on this server that were declared by a <em>different</em> publisher's catalogue entry. Attesting signs a small, publicly visible statement with this server's own catalogue identity.</p>
 <table id="candidates"><thead><tr><th></th><th>App</th><th>Publisher</th><th>Version</th><th>Action</th></tr></thead><tbody></tbody></table>
@@ -27,6 +47,108 @@
 <script>
 let csrfToken = null;
 let history = [];
+
+function shortKey(key) {
+  return key ? key.slice(0, 12) + "…" : "";
+}
+
+function formatChecks(checks) {
+  // checks values are informal (pass/fail/skip/error come from
+  // internal/ciresult, but this only reflects that vocabulary - it never
+  // enforces it), so anything other than "pass"/"fail" gets the neutral
+  // dot rather than assuming a fixed enum.
+  const list = document.createElement("ul");
+  list.className = "checks";
+  for (const [name, outcome] of Object.entries(checks || {})) {
+    const item = document.createElement("li");
+    item.className = outcome === "pass" ? "check-pass" : outcome === "fail" ? "check-fail" : "check-other";
+    item.textContent = `${name}: ${outcome}`;
+    list.appendChild(item);
+  }
+  return list;
+}
+
+function buildTrustCard(entry) {
+  // Every field here (app_id, publisher, commit, check names/outcomes)
+  // ultimately comes from a signed Nostr event authored by some other
+  // trusted-but-not-infallible party, so this is built with DOM nodes and
+  // textContent throughout - never innerHTML - the same discipline
+  // buildHistoryRow/loadCandidates already apply below.
+  const card = document.createElement("div");
+  card.className = "trust-card";
+
+  const head = document.createElement("div");
+  head.className = "trust-head";
+  const title = document.createElement("h3");
+  title.textContent = `${entry.app_id}  v${entry.version}`;
+  head.appendChild(title);
+  const badge = document.createElement("span");
+  if (!entry.policy.accepted) {
+    badge.className = "badge badge-unverified";
+    badge.textContent = "UNVERIFIED";
+  } else if (entry.policy.verified) {
+    badge.className = "badge badge-verified";
+    badge.textContent = "Verified";
+  } else {
+    badge.className = "badge badge-informational";
+    badge.textContent = "Informational";
+  }
+  head.appendChild(badge);
+  card.appendChild(head);
+
+  const meta = document.createElement("div");
+  meta.className = "trust-meta";
+  meta.textContent = `Revision ${shortKey(entry.commit)} · Publisher ${shortKey(entry.publisher)} · Status: ${entry.status}`;
+  card.appendChild(meta);
+
+  if (entry.attestations && entry.attestations.length) {
+    for (const attestation of entry.attestations) {
+      const block = document.createElement("div");
+      block.className = "attestation-block";
+      const line = document.createElement("div");
+      line.className = "trust-meta";
+      line.textContent = `${attestation.status} by ${shortKey(attestation.verifier)} on ${new Date(attestation.tested_at * 1000).toLocaleDateString()}`;
+      block.appendChild(line);
+      block.appendChild(formatChecks(attestation.checks));
+      card.appendChild(block);
+    }
+  } else {
+    const none = document.createElement("div");
+    none.className = "trust-meta";
+    none.textContent = "No CI attestations yet.";
+    card.appendChild(none);
+  }
+
+  if (!entry.policy.accepted) {
+    const exclusion = document.createElement("div");
+    exclusion.className = "exclusion";
+    const requirement = entry.policy.required_checks && entry.policy.required_checks.length
+      ? `every one of: ${entry.policy.required_checks.join(", ")}`
+      : "an overall passing result";
+    const minimum = entry.policy.minimum_attestations || 1;
+    exclusion.textContent = `Local policy: ${entry.policy.mode || "off"}. Requires ${minimum} independent attestation(s) with ${requirement}. Result: excluded from the generated YunoHost catalogue until this revision meets that bar.`;
+    card.appendChild(exclusion);
+  }
+
+  return card;
+}
+
+async function loadTrust() {
+  const response = await fetch("/admin/trust");
+  const entries = await response.json();
+  const container = document.getElementById("trust");
+  container.innerHTML = "";
+  if (!entries.length) {
+    const empty = document.createElement("p");
+    empty.className = "trust-meta";
+    empty.textContent = "No accepted declarations yet.";
+    container.appendChild(empty);
+    return;
+  }
+  for (const entry of entries) {
+    container.appendChild(buildTrustCard(entry));
+  }
+}
 
 function historyFor(candidate) {
   return history.filter((entry) => entry.app_id === candidate.app_id && entry.publisher === candidate.publisher);
@@ -149,6 +271,7 @@ async function attest(candidate, claim) {
   await loadCandidates();
 }
 
+loadTrust();
 loadCandidates();
 </script>
 </body>
