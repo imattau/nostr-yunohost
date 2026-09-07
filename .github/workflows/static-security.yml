@@ -1,0 +1,204 @@
+name: Static package security checks
+
+# Reusable workflow for YunoHost package (_ynh) repositories. Runs only
+# checks that are safe against essentially any submitted repository - it
+# never executes the package's own lifecycle scripts (install, remove,
+# upgrade, backup, restore, change_url). That boundary is deliberate: see
+# docs/security-workflow.md's "Static CI vs Execution CI" section. Produces
+# an unsigned ci-result.json artifact matching internal/ciresult's schema
+# (docs/ci-result-schema.md), which `nostr-ynh attest` later signs into a
+# kind-30080 attestation event (docs/attestations.md).
+#
+# Usage from a package repository:
+#
+#   jobs:
+#     static-security:
+#       uses: nostr-yunohost/nostr-yunohost/.github/workflows/static-security.yml@main
+
+on:
+  workflow_call:
+    inputs:
+      nostr-yunohost-version:
+        description: nostr-yunohost module version or Git ref to install for manifest validation and hashing
+        required: false
+        type: string
+        default: main
+    outputs:
+      result:
+        description: Overall result (pass, fail, or error)
+        value: ${{ jobs.static.outputs.result }}
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.summarize.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Install nostr-ynh
+        shell: bash
+        run: go install "github.com/nostr-yunohost/nostr-yunohost/cmd/nostr-ynh@${{ inputs.nostr-yunohost-version }}"
+
+      # Doubles as manifest validation: ReadMetadata (internal/repository)
+      # rejects a missing/malformed manifest.toml or one without id/version
+      # before any hash is computed. A throwaway key is generated only to
+      # satisfy the CLI's signing step for --dry-run; it is never persisted
+      # or published, and no secret is required to run this check.
+      - name: Manifest validation and hashing
+        id: manifest
+        shell: bash
+        run: |
+          set -uo pipefail
+          bin="$(go env GOPATH)/bin/nostr-ynh"
+          key="$("$bin" keygen | python3 -c 'import json,sys; print(json.load(sys.stdin)["private_key_hex"])')"
+          if "$bin" publish --repo . --private-key "$key" --dry-run --json > declaration.json 2> manifest.log; then
+            echo "outcome=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "outcome=fail" >> "$GITHUB_OUTPUT"
+            cat manifest.log
+          fi
+
+      - name: YunoHost package lint
+        id: lint
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          git clone --quiet --depth 1 https://github.com/YunoHost/package_linter.git /tmp/package_linter
+          python3 -m pip install --quiet -r /tmp/package_linter/requirements.txt
+          python3 /tmp/package_linter/package_linter.py "$GITHUB_WORKSPACE" --json > lint.json
+          test "$(jq '(.errors // []) | length' lint.json)" -eq 0
+
+      - name: ShellCheck
+        id: shellcheck
+        if: always()
+        continue-on-error: true
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: scripts
+
+      - name: Gitleaks
+        id: gitleaks
+        if: always()
+        continue-on-error: true
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Trivy filesystem scan
+        id: trivy
+        if: always()
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+
+      - name: GitHub Actions workflow scan
+        id: workflow_scan
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [ ! -d .github/workflows ]; then
+            echo "no .github/workflows directory; nothing to scan"
+            exit 0
+          fi
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo" --workdir /repo rhysd/actionlint:latest -color
+
+      - name: Summarize
+        id: summarize
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          python3 - <<'PYEOF'
+          import json, os, sys
+
+          def outcome_to_check(step_outcome):
+              return {
+                  "success": "pass",
+                  "failure": "fail",
+                  "skipped": "skip",
+                  "cancelled": "error",
+              }.get(step_outcome, "error")
+
+          checks = {
+              "manifest_validation": os.environ["MANIFEST_OUTCOME"],
+              "yunohost_lint": outcome_to_check(os.environ["LINT_OUTCOME"]),
+              "shellcheck": outcome_to_check(os.environ["SHELLCHECK_OUTCOME"]),
+              "secret_scan": outcome_to_check(os.environ["GITLEAKS_OUTCOME"]),
+              "vulnerability_scan": outcome_to_check(os.environ["TRIVY_OUTCOME"]),
+              "workflow_scan": outcome_to_check(os.environ["WORKFLOW_SCAN_OUTCOME"]),
+          }
+          overall = "pass" if all(v == "pass" for v in checks.values()) else (
+              "error" if any(v == "error" for v in checks.values()) else "fail"
+          )
+
+          print("::group::checks")
+          print(json.dumps(checks, indent=2))
+          print("::endgroup::")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"result={overall}\n")
+
+          if checks["manifest_validation"] != "pass":
+              print("manifest validation failed; ci-result.json cannot be produced without valid hashes", file=sys.stderr)
+              sys.exit(0)
+
+          declaration = json.load(open("declaration.json"))
+          tags = {tag[0]: tag[1] for tag in declaration["event"]["tags"] if len(tag) >= 2}
+          result = {
+              "schema": 1,
+              "app_id": tags["d"],
+              "repository": tags["repo"],
+              "commit": tags["commit"],
+              "manifest": tags["manifest"],
+              "content": tags["content"],
+              "checks": checks,
+              "result": overall,
+          }
+          with open("ci-result.json", "w") as f:
+              json.dump(result, f, indent=2)
+              f.write("\n")
+          PYEOF
+        env:
+          MANIFEST_OUTCOME: ${{ steps.manifest.outputs.outcome }}
+          LINT_OUTCOME: ${{ steps.lint.outcome }}
+          SHELLCHECK_OUTCOME: ${{ steps.shellcheck.outcome }}
+          GITLEAKS_OUTCOME: ${{ steps.gitleaks.outcome }}
+          TRIVY_OUTCOME: ${{ steps.trivy.outcome }}
+          WORKFLOW_SCAN_OUTCOME: ${{ steps.workflow_scan.outcome }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-result
+          path: |
+            ci-result.json
+            declaration.json
+            manifest.log
+            lint.json
+          if-no-files-found: ignore
+
+      - name: Fail the job if the overall result is not pass
+        if: steps.summarize.outputs.result != 'pass'
+        shell: bash
+        run: |
+          echo "overall result: ${{ steps.summarize.outputs.result }}"
+          exit 1
