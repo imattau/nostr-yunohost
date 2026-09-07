@@ -198,7 +198,15 @@ func attestationKey(repositoryURL, commit string) string {
 // revision doesn't erase a previously accepted older one out from under
 // WriteSnapshot (Phase 11).
 type Store struct {
-	mu     sync.RWMutex
+	mu sync.RWMutex
+	// saveMu serializes Save's file write/rename separately from mu (which
+	// only guards in-memory state and is released before the slow I/O
+	// starts). Save is called from more than one goroutine in practice -
+	// cmd/nostr-catalogd runs independent declaration and attestation
+	// subscriptions, each saving after every accepted event - and without
+	// this, two concurrent Save calls race on the same fixed temp file
+	// path, risking a corrupted or silently dropped write.
+	saveMu sync.Mutex
 	policy trust.ExplicitPublishers
 	// entries is keyed by publisher\x00appID; each value is that pair's
 	// known revisions, newest-first.
@@ -503,6 +511,8 @@ func (s *Store) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("encode catalogue cache: %w", err)
 	}
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return fmt.Errorf("create cache directory: %w", err)
 	}

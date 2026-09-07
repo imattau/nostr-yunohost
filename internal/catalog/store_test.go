@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -1041,6 +1042,51 @@ func TestIngestAttestationLoadDoesNotResurrectStaleCachedAttestation(t *testing.
 	})
 	if len(matched) != 1 || matched[0].Result != "fail" {
 		t.Fatalf("loading a stale cached attestation must not overwrite a newer in-memory one: %+v", matched)
+	}
+}
+
+// TestConcurrentSaveDoesNotCorruptCache exercises cmd/nostr-catalogd's real
+// shape: independent goroutines each calling Save after every accepted
+// declaration or attestation. Before saveMu existed, two Save calls could
+// interleave their writes to the same fixed ".tmp" path, and whichever
+// happened to finish last would win the rename over a possibly-corrupted
+// or partially-written file. Run with -race to catch the data race
+// directly, not just the corrupted-file symptom.
+func TestConcurrentSaveDoesNotCorruptCache(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	verifierKey := strings.Repeat("9", 64)
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	cachePath := filepath.Join(t.TempDir(), "catalogue.json")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			event := signedEventWith(t, publisherKey, "hello_nostr", "https://github.com/example/app_ynh", "1.0.0~ynh1", nostr.Timestamp(i+1))
+			_ = store.IngestVerified(context.Background(), event, verify)
+			_ = store.Save(cachePath)
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			attestation := signedAttestationAt(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent, "pass", int64(i+1))
+			_ = store.IngestAttestation(attestation)
+			_ = store.Save(cachePath)
+		}(i)
+	}
+	wg.Wait()
+
+	restored := NewStore(policy)
+	if err := restored.Load(cachePath); err != nil {
+		t.Fatalf("cache file was corrupted by concurrent Save calls: %v", err)
 	}
 }
 

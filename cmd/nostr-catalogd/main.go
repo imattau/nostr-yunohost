@@ -118,16 +118,22 @@ func main() {
 		}()
 	}
 	// Attestations are consumed unconditionally, unlike endorsements: a
-	// well-formed attestation is accepted into the store regardless of any
-	// trust configuration, since nothing yet decides whether attestations
-	// affect the generated catalogue (docs/attestation-trust-policy-plan.md
-	// Phase 6, not implemented). Storing them now means they are already
-	// available once that policy exists, rather than silently dropped in
-	// the meantime.
+	// well-formed attestation is accepted into the store regardless of the
+	// configured --attestation-policy, since off/prefer still record it
+	// (informationally) and require needs it available the moment it
+	// arrives. Saved on every accepted attestation, mirroring the
+	// declaration subscription above - without this, a newly received
+	// attestation would only survive a restart by coincidence, whenever a
+	// declaration happened to be saved afterward, defeating the point of
+	// persisting attestations at all (see docs/attestations.md).
 	go func() {
 		for received := range client.SubscribeAttestations(ctx) {
 			if err := store.IngestAttestation(*received.Event); err != nil {
 				log.Printf("reject attestation %s: %v", received.ID, err)
+				continue
+			}
+			if err := store.Save(*cachePath); err != nil {
+				log.Printf("save catalogue cache: %v", err)
 			}
 		}
 	}()
