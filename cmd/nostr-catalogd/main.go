@@ -13,6 +13,9 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/nbd-wtf/go-nostr"
+
+	"github.com/nostr-yunohost/nostr-yunohost/internal/attestation"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/catalog"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/curation"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/relay"
@@ -30,6 +33,10 @@ func main() {
 	trustedList := flag.String("trusted-publishers", os.Getenv("NOSTR_YNH_TRUSTED_PUBLISHERS"), "comma-separated publisher hex keys or npubs")
 	trustedCurators := flag.String("trusted-curators", os.Getenv("NOSTR_YNH_TRUSTED_CURATORS"), "comma-separated curator hex keys or npubs")
 	minimumEndorsements := flag.Int("minimum-endorsements", defaultMinimumEndorsements(), "minimum trusted endorsements for canonical selection")
+	adminListen := flag.String("admin-listen", os.Getenv("NOSTR_YNH_ADMIN_LISTEN"), "HTTP listen address for the attestation admin page (disabled if empty)")
+	publisherKeyFile := flag.String("publisher-key-file", os.Getenv("NOSTR_YNH_PUBLISHER_KEY_FILE"), "path to this server's own signing key (enables the attestation admin page)")
+	installedAppsFile := flag.String("installed-apps-file", os.Getenv("NOSTR_YNH_INSTALLED_APPS_FILE"), "path to the privileged helper's installed-app snapshot")
+	attestationLedgerFile := flag.String("attestation-ledger", os.Getenv("NOSTR_YNH_ATTESTATION_LEDGER"), "path to the local record of attestations this server has already published")
 	flag.Parse()
 	if *versionFlag {
 		fmt.Println(version)
@@ -88,6 +95,24 @@ func main() {
 		}()
 	}
 
+	if *adminListen != "" && *publisherKeyFile != "" {
+		admin, err := newAdminServer(store, *publisherKeyFile, *installedAppsFile, *attestationLedgerFile, client)
+		if err != nil {
+			log.Fatal(err)
+		}
+		adminServerHTTP := &http.Server{Addr: *adminListen, Handler: admin.mux()}
+		go func() {
+			<-ctx.Done()
+			_ = adminServerHTTP.Shutdown(context.Background())
+		}()
+		go func() {
+			log.Printf("nostr-catalogd admin page listening on %s", *adminListen)
+			if err := adminServerHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("admin server: %v", err)
+			}
+		}()
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) {
 		response.WriteHeader(http.StatusOK)
@@ -117,6 +142,40 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+// newAdminServer wires up the attestation admin page: it loads this
+// server's own signing key (the same key used to sign the declarations it
+// publishes - see nostr_catalog_ynh's ensure_publisher_key), derives its
+// public key for the self-attestation guard, and opens (or creates) the
+// local attestation ledger.
+func newAdminServer(store *catalog.Store, publisherKeyFile, installedAppsFile, ledgerFile string, client *relay.Client) (*adminServer, error) {
+	keyBytes, err := os.ReadFile(publisherKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read publisher key: %w", err)
+	}
+	privateKey := strings.TrimSpace(string(keyBytes))
+	selfPublisher, err := nostr.GetPublicKey(privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("derive publisher public key: %w", err)
+	}
+	if installedAppsFile == "" {
+		installedAppsFile = "installed-apps.json"
+	}
+	if ledgerFile == "" {
+		ledgerFile = "attestation-ledger.json"
+	}
+	ledger, err := attestation.LoadLedger(ledgerFile)
+	if err != nil {
+		return nil, fmt.Errorf("load attestation ledger: %w", err)
+	}
+	return &adminServer{
+		store:         store,
+		publisher:     &attestation.Publisher{Client: client, PrivateKey: privateKey, Ledger: ledger},
+		ledger:        ledger,
+		selfPublisher: selfPublisher,
+		installedPath: installedAppsFile,
+	}, nil
 }
 
 func splitNonEmpty(raw string) []string {

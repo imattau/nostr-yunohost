@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nostr Catalogue — Attestations</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.25rem; }
+  table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+  th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #ddd; }
+  button { margin-right: 0.25rem; }
+  .status { font-size: 0.9rem; color: #555; margin-top: 1rem; white-space: pre-wrap; }
+  .attested { color: #2a7; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Apps you could attest to</h1>
+<p>These are apps installed on this server that were declared by a <em>different</em> publisher's catalogue entry. Attesting signs a small, publicly visible statement with this server's own catalogue identity.</p>
+<table id="candidates"><thead><tr><th>App</th><th>Publisher</th><th>Version</th><th>Action</th></tr></thead><tbody></tbody></table>
+<div class="status" id="status"></div>
+<script>
+let csrfToken = null;
+
+async function loadCandidates() {
+  const response = await fetch("/admin/attestable");
+  const body = await response.json();
+  csrfToken = body.csrf_token;
+  const tbody = document.querySelector("#candidates tbody");
+  tbody.innerHTML = "";
+  for (const candidate of body.candidates) {
+    // Every field here (app_id, publisher, version) ultimately comes from a
+    // Nostr declaration signed by some *other* trusted publisher - trusted
+    // to publish an app, not to inject markup into this admin's browser.
+    // version in particular is never format-validated (unlike appID,
+    // commit, or the manifest/content hashes), so build the row with
+    // textContent/DOM nodes rather than innerHTML.
+    const row = document.createElement("tr");
+    for (const text of [candidate.app_id, candidate.publisher.slice(0, 12) + "…", candidate.version]) {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      row.appendChild(cell);
+    }
+    const actionsCell = document.createElement("td");
+    if (candidate.attested) {
+      const span = document.createElement("span");
+      span.className = "attested";
+      span.textContent = "attested";
+      actionsCell.appendChild(span);
+    } else {
+      for (const claim of ["recommend", "tested"]) {
+        const button = document.createElement("button");
+        button.textContent = claim === "recommend" ? "Recommend" : "Tested";
+        button.addEventListener("click", () => attest(candidate, claim));
+        actionsCell.appendChild(button);
+      }
+    }
+    row.appendChild(actionsCell);
+    tbody.appendChild(row);
+  }
+}
+
+async function attest(candidate, claim) {
+  const status = document.getElementById("status");
+  status.textContent = "Signing and publishing...";
+  const response = await fetch("/admin/attest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+    body: JSON.stringify({ app_id: candidate.app_id, publisher: candidate.publisher, claim }),
+  });
+  if (!response.ok) {
+    status.textContent = "Failed: " + (await response.text());
+    return;
+  }
+  const outcomes = await response.json();
+  status.textContent = JSON.stringify(outcomes, null, 2);
+  await loadCandidates();
+}
+
+loadCandidates();
+</script>
+</body>
+</html>

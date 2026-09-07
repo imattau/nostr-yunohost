@@ -58,6 +58,14 @@ func normalizeRepository(repository string) string {
 	return strings.TrimSuffix(repository, ".git")
 }
 
+// NormalizeRepositoryURL exposes the same repository-identity normalization
+// used to resolve same-source duplicate declarations, so other packages
+// (such as matching a locally installed app back to its declaration) treat
+// repository URLs identically instead of re-implementing the rule.
+func NormalizeRepositoryURL(repository string) string {
+	return normalizeRepository(repository)
+}
+
 func newerRecord(left, right record) bool {
 	if left.CreatedAt != right.CreatedAt {
 		return left.CreatedAt > right.CreatedAt
@@ -287,6 +295,16 @@ func (s *Store) Load(path string) error {
 	return nil
 }
 
+// Declarations returns every currently accepted declaration, in stable
+// publisher/app order. Unlike Snapshot, this includes entries that have not
+// (yet) been verified against their authoritative repository (Manifest ==
+// nil), so callers that only care about the declared identity (publisher,
+// app ID, repository) - such as matching against locally installed apps -
+// see the full accepted set.
+func (s *Store) Declarations() []protocol.AppDeclaration {
+	return s.Snapshot()
+}
+
 // Snapshot returns declarations in stable publisher/app order.
 func (s *Store) Snapshot() []protocol.AppDeclaration {
 	s.mu.RLock()
@@ -323,6 +341,13 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 		}
 		byAppID[entry.Declaration.AppID] = append(byAppID[entry.Declaration.AppID], entry)
 	}
+	// Computed once for the whole snapshot rather than once per app -
+	// TrustedEndorsementCount would otherwise rebuild this same tally from
+	// scratch for every entry in byAppID.
+	var endorsementCounts map[string]int
+	if s.curationPolicy != nil {
+		endorsementCounts = s.curationPolicy.EndorsementCounts(s.endorsements)
+	}
 	for appID, candidates := range byAppID {
 		var selected record
 		if len(candidates) == 1 {
@@ -355,6 +380,10 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 		if err != nil {
 			s.mu.RUnlock()
 			return fmt.Errorf("translate app %s: %w", appID, err)
+		}
+		if s.curationPolicy != nil {
+			count := endorsementCounts[selected.Declaration.Publisher+"\x00"+appID]
+			app.HighQuality = count >= s.curationPolicy.MinimumEndorsements()
 		}
 		catalogue.Apps[appID] = app
 	}

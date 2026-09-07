@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/curation"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
 )
@@ -142,6 +143,64 @@ func TestWriteSnapshotSelectsLatestVerifiedSameSource(t *testing.T) {
 	}
 	if !bytes.Contains(output.Bytes(), []byte(`"version":"1.1.0~ynh1"`)) {
 		t.Fatalf("snapshot did not select highest same-source version: %s", output.String())
+	}
+}
+
+func TestWriteSnapshotSetsHighQualityOnceThresholdMet(t *testing.T) {
+	event := signedEvent(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "hello_nostr")
+	publisher, _ := nostr.GetPublicKey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+
+	// No curation policy configured: HighQuality must stay false.
+	var withoutPolicy bytes.Buffer
+	if err := store.WriteSnapshot(&withoutPolicy); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(withoutPolicy.Bytes(), []byte(`"high_quality":true`)) {
+		t.Fatalf("expected high_quality false with no curation policy: %s", withoutPolicy.String())
+	}
+
+	curatorKey := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	curator, _ := nostr.GetPublicKey(curatorKey)
+	curationPolicy, err := curation.NewPolicy([]string{curator}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetCurationPolicy(curationPolicy)
+
+	// Below threshold (no endorsements yet): still false.
+	var belowThreshold bytes.Buffer
+	if err := store.WriteSnapshot(&belowThreshold); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(belowThreshold.Bytes(), []byte(`"high_quality":true`)) {
+		t.Fatalf("expected high_quality false below threshold: %s", belowThreshold.String())
+	}
+
+	endorsementEvent, err := curation.Build(publisher, "hello_nostr", "tested", "works great", curatorKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IngestEndorsement(endorsementEvent); err != nil {
+		t.Fatal(err)
+	}
+
+	var atThreshold bytes.Buffer
+	if err := store.WriteSnapshot(&atThreshold); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(atThreshold.Bytes(), []byte(`"high_quality":true`)) {
+		t.Fatalf("expected high_quality true once the endorsement threshold is met: %s", atThreshold.String())
 	}
 }
 

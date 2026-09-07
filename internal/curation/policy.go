@@ -41,10 +41,14 @@ func (p Policy) Accept(event nostr.Event) (Endorsement, error) {
 	return endorsement, nil
 }
 
-// SelectCanonical returns a declaration only when exactly one candidate has
-// the highest trusted endorsement count and meets the configured threshold.
-// A nil result means no canonical selection is safe.
-func (p Policy) SelectCanonical(candidates []protocol.AppDeclaration, endorsements []Endorsement) *protocol.AppDeclaration {
+// trustedEndorsementCounts tallies distinct trusted curators per
+// publisher/app pair, counting only claims that carry curation weight
+// ("recommend" or "tested"). The set of trusted curators has already been
+// enforced upstream by Accept, but endorsements passed in directly (as when
+// replaying a stored list) are not re-checked against trustedCurators here -
+// callers that need that guarantee should only pass endorsements that came
+// through Accept.
+func (p Policy) trustedEndorsementCounts(endorsements []Endorsement) map[string]map[string]struct{} {
 	counts := make(map[string]map[string]struct{})
 	for _, endorsement := range endorsements {
 		if endorsement.Claim != "recommend" && endorsement.Claim != "tested" {
@@ -56,6 +60,43 @@ func (p Policy) SelectCanonical(candidates []protocol.AppDeclaration, endorsemen
 		}
 		counts[key][endorsement.Curator] = struct{}{}
 	}
+	return counts
+}
+
+// TrustedEndorsementCount returns the number of distinct curators who have
+// endorsed the given publisher/app pair with a "recommend" or "tested"
+// claim. Callers checking many publisher/app pairs against the same
+// endorsement list (such as Store.WriteSnapshot, once per app in the
+// catalogue) should call EndorsementCounts once instead, to avoid
+// rebuilding the same tally from scratch for every pair.
+func (p Policy) TrustedEndorsementCount(publisher, appID string, endorsements []Endorsement) int {
+	return p.EndorsementCounts(endorsements)[publisher+"\x00"+appID]
+}
+
+// EndorsementCounts tallies distinct trusted-curator counts for every
+// publisher/app pair present in endorsements at once, keyed by
+// "publisher\x00appID" - the same key convention Store already uses
+// internally. Meant to be computed once per snapshot/selection pass rather
+// than once per pair.
+func (p Policy) EndorsementCounts(endorsements []Endorsement) map[string]int {
+	sets := p.trustedEndorsementCounts(endorsements)
+	counts := make(map[string]int, len(sets))
+	for key, curators := range sets {
+		counts[key] = len(curators)
+	}
+	return counts
+}
+
+// MinimumEndorsements returns the configured endorsement threshold.
+func (p Policy) MinimumEndorsements() int {
+	return p.minimumEndorsements
+}
+
+// SelectCanonical returns a declaration only when exactly one candidate has
+// the highest trusted endorsement count and meets the configured threshold.
+// A nil result means no canonical selection is safe.
+func (p Policy) SelectCanonical(candidates []protocol.AppDeclaration, endorsements []Endorsement) *protocol.AppDeclaration {
+	counts := p.trustedEndorsementCounts(endorsements)
 	var selected *protocol.AppDeclaration
 	best := 0
 	tied := false
