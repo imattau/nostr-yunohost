@@ -437,6 +437,78 @@ func TestWriteSnapshotRequirePolicyIncludesAttestedApp(t *testing.T) {
 	}
 }
 
+func TestWriteSnapshotSetsHighQualityFromCIVerifiedStatus(t *testing.T) {
+	// Off policy, no curation policy configured at all: HighQuality must
+	// still turn on from a passing CI attestation alone (Phase 10) - it is
+	// a second, independent route to the same field, not something that
+	// requires curator endorsements to be configured first.
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	verifierKey := strings.Repeat("e1", 32)
+	event := signedEvent(t, publisherKey, "hello_nostr")
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+
+	before := writeSnapshotCatalog(t, store)
+	if before.Apps["hello_nostr"].HighQuality {
+		t.Fatalf("expected high_quality false before any attestation: %+v", before.Apps["hello_nostr"])
+	}
+
+	passing := signedAttestation(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent)
+	if err := store.IngestAttestation(passing); err != nil {
+		t.Fatal(err)
+	}
+
+	after := writeSnapshotCatalog(t, store)
+	if !after.Apps["hello_nostr"].HighQuality {
+		t.Fatalf("expected high_quality true once a CI attestation passes: %+v", after.Apps["hello_nostr"])
+	}
+	// Level stays the compatibility floor regardless - it is not a proxy
+	// for attestation status (Phase 10's point).
+	if after.Apps["hello_nostr"].Level != 5 {
+		t.Fatalf("expected Level to remain untouched by attestation status: %+v", after.Apps["hello_nostr"])
+	}
+}
+
+func TestTrustEntriesIncludesComputedStatus(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	verifierKey := strings.Repeat("f1", 32)
+	event := signedEvent(t, publisherKey, "hello_nostr")
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := store.TrustEntries()[0].Status; got != StatusIntegrityVerified {
+		t.Fatalf("Status = %q before any attestation, want %q", got, StatusIntegrityVerified)
+	}
+
+	passing := signedAttestation(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent)
+	if err := store.IngestAttestation(passing); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.TrustEntries()[0].Status; got != StatusCIVerified {
+		t.Fatalf("Status = %q after a passing attestation, want %q", got, StatusCIVerified)
+	}
+}
+
 func TestWriteSnapshotOffPolicyIncludesUnattestedApp(t *testing.T) {
 	// The zero-value Store (no SetAttestationPolicy call) must behave
 	// exactly as it did before this policy existed.

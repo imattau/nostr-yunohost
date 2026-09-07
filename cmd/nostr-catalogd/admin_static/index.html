@@ -98,7 +98,7 @@ function buildTrustCard(entry) {
 
   const meta = document.createElement("div");
   meta.className = "trust-meta";
-  meta.textContent = `Revision ${shortKey(entry.commit)} · Publisher ${shortKey(entry.publisher)} · Repository & manifest integrity: ${entry.repository_verified ? "verified" : "not yet verified"}`;
+  meta.textContent = `Revision ${shortKey(entry.commit)} · Publisher ${shortKey(entry.publisher)} · Status: ${entry.status}`;
   card.appendChild(meta);
 
   if (entry.attestations && entry.attestations.length) {

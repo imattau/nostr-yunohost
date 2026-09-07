@@ -352,9 +352,13 @@ type TrustEntry struct {
 	// and content hashes match (IngestVerifiedPackage) - false for a
 	// declaration accepted only via the cheaper Ingest path, which trusts
 	// the signature and trust-policy check alone.
-	RepositoryVerified bool                `json:"repository_verified"`
-	Attestations       []SecurityAppEntry  `json:"attestations"`
-	Policy             TrustPolicyDecision `json:"policy"`
+	RepositoryVerified bool `json:"repository_verified"`
+	// Status is this server's own AttestationStatus classification (Phase
+	// 10), independent of Policy below: Status is an objective read of the
+	// evidence, Policy is what the local administrator chose to do with it.
+	Status       AttestationStatus   `json:"status"`
+	Attestations []SecurityAppEntry  `json:"attestations"`
+	Policy       TrustPolicyDecision `json:"policy"`
 }
 
 // TrustPolicyDecision is the local policy's verdict for one TrustEntry,
@@ -389,6 +393,7 @@ func (s *Store) TrustEntries() []TrustEntry {
 			Version:            r.Declaration.Version,
 			Commit:             r.Declaration.Commit,
 			RepositoryVerified: r.Manifest != nil,
+			Status:             ComputeAttestationStatus(r.Manifest != nil, attestations),
 			Attestations:       securityEntries,
 			Policy: TrustPolicyDecision{
 				Mode:     s.attestationPolicy.Mode,
@@ -570,6 +575,15 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 		if s.curationPolicy != nil {
 			count := endorsementCounts[selected.Declaration.Publisher+"\x00"+appID]
 			app.HighQuality = count >= s.curationPolicy.MinimumEndorsements()
+		}
+		// Phase 10: CI-verified attestation status is a second, independent
+		// route to HighQuality alongside curator endorsements above - a
+		// genuine equivalent for YunoHost's "meets an elevated quality bar"
+		// field, not a repurposing of Level (see TranslateWithBranch's
+		// comment on why Level itself stays untouched by any of this).
+		status := ComputeAttestationStatus(selected.Manifest != nil, attestations)
+		if status == StatusCIVerified || status == StatusMultiVerified {
+			app.HighQuality = true
 		}
 		catalogue.Apps[appID] = app
 		// Phase 8: every attestation matching this exact revision becomes

@@ -196,3 +196,39 @@ neither implies the other. A server can endorse an app it installed (kind
 30079) without ever running CI; CI can attest a commit (kind 30080) without
 anyone having installed it yet. Local trust policy (Phase 6) may eventually
 weigh both, but the MVP trust policy considers attestations only.
+
+## Attestation status vs. YunoHost quality metadata
+
+`catalog.AttestationStatus` (`internal/catalog/yunohost.go`) is this
+daemon's own explicit classification of a declaration's standing, computed
+by `ComputeAttestationStatus(repositoryVerified, attestations)`:
+
+| Status | Meaning |
+| --- | --- |
+| `unverified` | This server has not independently confirmed the repository/commit/manifest/content hashes |
+| `integrity_verified` | Repository confirmed; no CI attestation exists yet for this exact revision |
+| `ci_verified` | Repository confirmed; exactly one independent verifier attested a passing result |
+| `multi_verified` | Repository confirmed; two or more independent verifiers each attested a passing result |
+| `failed` | Repository confirmed; at least one attestation exists, and none of them passed |
+
+This is deliberately kept separate from YunoHost's own quality fields:
+
+```text
+YunoHost quality level  !=  Nostr Catalog attestation status
+```
+
+`Level` stays hardcoded at `5` regardless of status - it is a compatibility
+floor for a YunoHost CI pipeline this catalogue has never run, which has
+nothing to do with what this catalogue itself has verified or attested.
+`HighQuality`, on the other hand, has a genuine equivalent: `WriteSnapshot`
+now sets it whenever `ComputeAttestationStatus` returns `ci_verified` or
+`multi_verified`, independently of (and in addition to) the existing
+curator-endorsement-threshold route. Either signal alone is enough; they
+are not required together.
+
+`Status` also appears on each `TrustEntries()` row (the admin trust
+dashboard, Phase 9) so an administrator sees the same classification the
+daemon used, not just the policy's accept/reject verdict - `status` and
+`policy` answer different questions (what the evidence shows, versus what
+the local administrator chose to do about it) and can disagree, e.g.
+`failed` under `off` policy still shows `Informational`/accepted.
