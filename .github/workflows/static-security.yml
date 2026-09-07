@@ -23,6 +23,17 @@ on:
         required: false
         type: string
         default: main
+      ignore-catalog-membership-lint:
+        description: >-
+          Ignore package_linter's AppCatalog.is_in_catalog/state_is_working
+          findings. Every known caller of this workflow distributes through
+          the custom Nostr catalog instead of YunoHost/apps, so those two
+          findings are permanently, expectedly true rather than regressions.
+          Set false for a package that is (or wants to be) in the official
+          catalog, where those findings are real signal.
+        required: false
+        type: boolean
+        default: true
     outputs:
       result:
         description: Overall result (pass, fail, or error)
@@ -83,8 +94,26 @@ jobs:
           # sys.exit(1) on its plain-text path), so pass/fail must come from
           # the JSON body itself: its "error" and "critical" keys are the
           # only severities that should fail this check ("warning"/"info"
-          # do not).
-          test "$(jq '(.error | length) + (.critical | length)' lint.json)" -eq 0
+          # do not). AppCatalog.is_in_catalog/state_is_working are excluded
+          # when ignore-catalog-membership-lint is set (the default): every
+          # known caller distributes through the custom Nostr catalog
+          # instead of submitting to YunoHost/apps, so those two findings
+          # are permanently, expectedly true rather than regressions.
+          python3 - lint.json <<'PYEOF'
+          import json, sys
+
+          IGNORE = {"true": True, "false": False}["${{ inputs.ignore-catalog-membership-lint }}"]
+          ALLOWED = {"AppCatalog.is_in_catalog", "AppCatalog.state_is_working"} if IGNORE else set()
+
+          with open(sys.argv[1]) as f:
+              data = json.load(f)
+
+          blocking = [c for c in data["critical"] + data["error"] if c not in ALLOWED]
+          if blocking:
+              print("Blocking linter findings:", blocking)
+              sys.exit(1)
+          print("No blocking linter findings" + (" (ignoring catalog-membership checks)." if IGNORE else "."))
+          PYEOF
 
       - name: ShellCheck
         id: shellcheck
