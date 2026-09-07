@@ -37,7 +37,7 @@ jobs:
     outputs:
       result: ${{ steps.summarize.outputs.result }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -79,7 +79,12 @@ jobs:
           git clone --quiet --depth 1 https://github.com/YunoHost/package_linter.git /tmp/package_linter
           python3 -m pip install --quiet -r /tmp/package_linter/requirements.txt
           python3 /tmp/package_linter/package_linter.py "$GITHUB_WORKSPACE" --json > lint.json
-          test "$(jq '(.errors // []) | length' lint.json)" -eq 0
+          # package_linter always exits 0 in --json mode (it only calls
+          # sys.exit(1) on its plain-text path), so pass/fail must come from
+          # the JSON body itself: its "error" and "critical" keys are the
+          # only severities that should fail this check ("warning"/"info"
+          # do not).
+          test "$(jq '(.error | length) + (.critical | length)' lint.json)" -eq 0
 
       - name: ShellCheck
         id: shellcheck
@@ -93,7 +98,7 @@ jobs:
         id: gitleaks
         if: always()
         continue-on-error: true
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
@@ -101,7 +106,7 @@ jobs:
         id: trivy
         if: always()
         continue-on-error: true
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -119,7 +124,7 @@ jobs:
             echo "no .github/workflows directory; nothing to scan"
             exit 0
           fi
-          docker run --rm -v "$GITHUB_WORKSPACE:/repo" --workdir /repo rhysd/actionlint:latest -color
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo" --workdir /repo rhysd/actionlint:1.7.12 -color
 
       - name: Summarize
         id: summarize

@@ -83,12 +83,29 @@ for diagnostics. The job itself fails whenever the overall result is not
 `pass`, so callers can gate merges on it directly, independent of whether
 anyone ever runs `nostr-ynh attest` on the result.
 
-## A caveat on the external tools
+## Verification
 
-package_linter, ShellCheck, Gitleaks, Trivy, and actionlint are all
-integrated by their current documented interfaces as of this writing, but
-none of that integration has been exercised against a live GitHub Actions
-runner in this change - there is no network access in the environment this
-workflow was written in. Before relying on this in a real package pipeline,
-run it once against a real `_ynh` repository and check each tool's actual
-invocation still matches its current CLI/action interface.
+Every tool integration was checked against its actual current source
+(fetched live, not from memory), not just assumed:
+
+- `package_linter --json` always exits `0` - it only calls `sys.exit(1)` on
+  its plain-text path, never its JSON one - so pass/fail is read directly
+  from the JSON body's `error`/`critical` keys (its real top-level keys are
+  `success`/`info`/`warning`/`error`/`critical`, each a list of test names;
+  there is no `errors` key).
+- `gitleaks/gitleaks-action@v2` stops working outright when GitHub removes
+  Node 20 from hosted runners on 2026-09-16 (no opt-out). The workflow uses
+  `@v3`, its documented Node-24 replacement with no input/behavior changes,
+  and `actions/checkout@v7` (the migration guide recommends `@v6` or later).
+- `aquasecurity/trivy-action` had a supply-chain compromise on several older
+  tags; only `v0.35.0`+ (`v`-prefixed) and the specific preserved `0.35.0`
+  tag are confirmed safe. The workflow pins `v0.36.0`, the current release,
+  with its `scan-type`/`scan-ref`/`exit-code`/`severity` inputs confirmed
+  unchanged on that tag.
+- `ludeeus/action-shellcheck@2.0.0` and the `rhysd/actionlint` Docker image
+  usage were confirmed current; actionlint is pinned to `1.7.12`.
+
+What's still unverified: this hasn't been run end-to-end on a live GitHub
+Actions runner against a real `_ynh` repository - only each component was
+checked against its actual source/release metadata. Run it once for real
+before gating a merge on it.
