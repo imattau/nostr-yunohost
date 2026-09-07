@@ -129,17 +129,27 @@ here (an app with zero attestations gets no entry at all, rather than an
 empty list). An app excluded entirely by `require` gets no security-index
 entry either, since it isn't in `Apps` for the index to be attached to.
 
-**Known gap, shared with endorsements, now load-bearing:** attestations are
-only accumulated from the live subscription opened at daemon startup -
-there is no historical fetch (no `FetchAttestations` alongside
-`FetchAppDeclarations`) and no persistence across restarts, matching the
-endorsement subscription's existing behavior. Under `require` mode this is
-no longer a cosmetic gap: **restarting the daemon transiently excludes every
-previously attested package** from the generated catalogue until relays
-resend those attestations. Anyone enabling `require` should be aware of
-this before relying on it in production; fixing it (historical fetch and/or
-cache persistence, for both endorsements and attestations) is unfinished
-follow-up work, not part of this phase.
+Attestations persist across restarts via `Store.Save`/`Load`, the same
+local JSON cache declarations already use (`cacheFile.Attestations`,
+flattened from `Store.attestations` and restored through the same
+same-verifier-same-revision dedup rule `IngestAttestation` applies live, so
+a stale cached attestation can never overwrite a newer in-memory one). This
+was added specifically because it matters under `require`: without it, a
+daemon restart would transiently exclude every previously attested
+package from the generated catalogue until relays resent those
+attestations - which defeats Phase 11's whole point of keeping a trusted
+revision installable. `endorsements` (kind 30079, a separate feature) do
+not persist this way and remain live-subscription-only - that gap is real
+but not load-bearing the way the attestation one was, since nothing
+excludes an app from the catalogue for lacking an endorsement.
+
+**Remaining, smaller gap:** attestations are still only *accumulated* from
+the live subscription plus whatever the cache already held - there is no
+historical fetch on startup (no `FetchAttestations` alongside
+`FetchAppDeclarations`). A daemon that has never seen a given attestation
+(fresh install, or a cache predating it) won't have it until the
+publishing relay resends it live. Persistence closes the restart gap;
+a historical fetch would additionally close the cold-start one.
 
 ## Local trust policy
 
@@ -227,14 +237,12 @@ revision regardless of attestation status - discovery stays independent of
 installability (Phase 7). Only `WriteSnapshot`'s per-app selection applies
 the fallback.
 
-**Interacts with the known persistence gap above:** since attestations
-themselves aren't persisted across a daemon restart (only declarations
-are), a restart under `require` currently loses every revision's
-attestation evidence at once - the fallback still works logically (an older
-revision without an attestation is excluded exactly like a newer one
-without one), but until that gap is fixed, a restart can transiently
-exclude an app that was previously attested and installable, not just fail
-to advance past it.
+This fallback depends on attestation evidence actually surviving a
+restart - which it now does (see the persistence note above). Before that
+fix, a restart under `require` would have lost every revision's
+attestation evidence at once, making the fallback logically correct but
+practically useless (an older, previously-attested revision would look
+identical to a never-attested one and get excluded too).
 
 ## Admin trust dashboard
 

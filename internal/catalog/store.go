@@ -320,9 +320,20 @@ func (s *Store) IngestAttestation(event nostr.Event) error {
 	if err != nil {
 		return err
 	}
-	key := attestationKey(parsed.Repository, parsed.Commit)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.storeAttestationLocked(event, parsed)
+	return nil
+}
+
+// storeAttestationLocked applies an already-parsed attestation's dedup rule
+// (a later event from the same verifier for the same revision replaces its
+// earlier one) - shared by IngestAttestation and Load, which restores
+// cached attestations following the same rule so a replay of an older
+// cached event can never resurrect a stale attestation over one already in
+// memory.
+func (s *Store) storeAttestationLocked(event nostr.Event, parsed verification.Attestation) {
+	key := attestationKey(parsed.Repository, parsed.Commit)
 	if s.attestations == nil {
 		s.attestations = make(map[string]map[string]attestationRecord)
 	}
@@ -332,10 +343,9 @@ func (s *Store) IngestAttestation(event nostr.Event) error {
 		s.attestations[key] = byVerifier
 	}
 	if existing, ok := byVerifier[parsed.Verifier]; ok && existing.Event.CreatedAt >= event.CreatedAt {
-		return nil
+		return
 	}
 	byVerifier[parsed.Verifier] = attestationRecord{Event: event, Attestation: parsed}
-	return nil
 }
 
 // AttestationsFor returns every stored attestation that actually matches
@@ -466,19 +476,30 @@ func (s *Store) TrustEntries() []TrustEntry {
 
 type cacheFile struct {
 	Entries []record `json:"entries"`
+	// Attestations persists every stored kind-30080 event, flattened from
+	// Store.attestations, so a restart doesn't lose them - see Load's
+	// comment on why this matters under AttestationRequire.
+	Attestations []nostr.Event `json:"attestations,omitempty"`
 }
 
-// Save persists every retained revision to a local JSON cache, flattened
-// from Store.entries's per-key revision lists. The write is atomic within
-// the target directory.
+// Save persists every retained revision and every stored attestation to a
+// local JSON cache, flattened from Store.entries's per-key revision lists
+// and Store.attestations's per-revision/per-verifier maps respectively. The
+// write is atomic within the target directory.
 func (s *Store) Save(path string) error {
 	s.mu.RLock()
 	var entries []record
 	for _, revisions := range s.entries {
 		entries = append(entries, revisions...)
 	}
+	var attestationEvents []nostr.Event
+	for _, byVerifier := range s.attestations {
+		for _, a := range byVerifier {
+			attestationEvents = append(attestationEvents, a.Event)
+		}
+	}
 	s.mu.RUnlock()
-	data, err := json.Marshal(cacheFile{Entries: entries})
+	data, err := json.Marshal(cacheFile{Entries: entries, Attestations: attestationEvents})
 	if err != nil {
 		return fmt.Errorf("encode catalogue cache: %w", err)
 	}
@@ -499,7 +520,12 @@ func (s *Store) Save(path string) error {
 // current cryptographic and trust policy, reconstructing each
 // publisher/app pair's full revision list (not just its newest revision) -
 // Phase 11's fallback depends on older revisions surviving a restart, not
-// only the current cache format's ability to round-trip one.
+// only the current cache format's ability to round-trip one. It also
+// restores every cached attestation: without this, a restart under
+// AttestationRequire would transiently exclude every previously attested
+// package until relays resent their attestations, which is exactly the
+// kind of gap Phase 11's revision fallback cannot paper over by itself -
+// the fallback still needs *some* accepted revision to fall back to.
 func (s *Store) Load(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -530,6 +556,16 @@ func (s *Store) Load(path string) error {
 		}
 		incoming := record{Event: entry.Event, Declaration: declaration, CreatedAt: entry.Event.CreatedAt, Manifest: entry.Manifest, Logo: entry.Logo, LogoHash: entry.LogoHash, Branch: branch}
 		s.entries[key] = upsertRevision(s.entries[key], incoming)
+	}
+	for _, event := range cached.Attestations {
+		parsed, err := verification.Parse(event)
+		if err != nil {
+			continue
+		}
+		// Load, like the rest of its own writes to s.entries above, runs
+		// without s.mu - callers load a store before any concurrent access
+		// begins (see cmd/nostr-catalogd/main.go).
+		s.storeAttestationLocked(event, parsed)
 	}
 	return nil
 }

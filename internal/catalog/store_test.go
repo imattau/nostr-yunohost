@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -905,14 +906,9 @@ func TestUpsertRevisionCapsAtMaxRevisionsPerKey(t *testing.T) {
 
 func TestStoreCacheRoundTripPreservesMultipleRevisions(t *testing.T) {
 	// Scoped to what Save/Load themselves are responsible for: every
-	// distinct revision surviving the round-trip. This deliberately uses
-	// Declarations/Snapshot, not WriteSnapshot under require - whether an
-	// attested v1 stays selectable after a restart also depends on
-	// attestations surviving the restart, which they currently don't
-	// (a separate, already-documented gap in docs/attestations.md; see
-	// TestWriteSnapshotDoesNotAdvanceToUnattestedUpgrade for the
-	// require-mode fallback behavior this store.go change fixes, exercised
-	// within a single process where that gap doesn't apply).
+	// distinct revision surviving the round-trip, independent of
+	// attestations (covered separately by
+	// TestStoreCacheRoundTripPreservesAttestationsAcrossRestart below).
 	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	publisher, _ := nostr.GetPublicKey(publisherKey)
 	policy, err := trust.NewExplicitPublishers([]string{publisher})
@@ -959,6 +955,92 @@ func TestStoreCacheRoundTripPreservesMultipleRevisions(t *testing.T) {
 	commits := map[string]bool{entries[0].Commit: true, entries[1].Commit: true}
 	if !commits[testDeclarationCommit] || !commits[strings.Repeat("d", 40)] {
 		t.Fatalf("expected both v1 and v2 commits present after restore, got: %+v", commits)
+	}
+}
+
+// TestStoreCacheRoundTripPreservesAttestationsAcrossRestart is the fix for
+// the gap TestWriteSnapshotDoesNotAdvanceToUnattestedUpgrade's own cache
+// round-trip once surfaced: a daemon restart under require must not
+// transiently un-attest (and so exclude) an already-attested, already
+// installable app just because the process restarted.
+func TestStoreCacheRoundTripPreservesAttestationsAcrossRestart(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	verifierKey := strings.Repeat("5", 64)
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	store.SetAttestationPolicy(trust.AttestationPolicy{Mode: trust.AttestationRequire})
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	v1 := signedEventWith(t, publisherKey, "hello_nostr", "https://github.com/example/app_ynh", "1.0.0~ynh1", 1)
+	if err := store.IngestVerified(context.Background(), v1, verify); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IngestAttestation(signedAttestation(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent)); err != nil {
+		t.Fatal(err)
+	}
+	before := writeSnapshotCatalog(t, store)
+	if _, ok := before.Apps["hello_nostr"]; !ok {
+		t.Fatal("expected the attested app installable before the simulated restart")
+	}
+
+	cachePath := filepath.Join(t.TempDir(), "catalogue.json")
+	if err := store.Save(cachePath); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := NewStore(policy)
+	restarted.SetAttestationPolicy(trust.AttestationPolicy{Mode: trust.AttestationRequire})
+	if err := restarted.Load(cachePath); err != nil {
+		t.Fatal(err)
+	}
+
+	after := writeSnapshotCatalog(t, restarted)
+	if _, ok := after.Apps["hello_nostr"]; !ok {
+		t.Fatal("a daemon restart must not transiently exclude an already-attested app under require")
+	}
+	if got := after.Apps["hello_nostr"].Git.Revision; got != testDeclarationCommit {
+		t.Fatalf("expected the restored catalogue to keep offering the attested revision, got %q", got)
+	}
+}
+
+func TestIngestAttestationLoadDoesNotResurrectStaleCachedAttestation(t *testing.T) {
+	verifierKey := strings.Repeat("7", 64)
+	store := NewStore(trust.ExplicitPublishers{})
+	newer := signedAttestationAt(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent, "fail", 2)
+	if err := store.IngestAttestation(newer); err != nil {
+		t.Fatal(err)
+	}
+
+	cachePath := filepath.Join(t.TempDir(), "catalogue.json")
+	// Save an older, stale cache containing only an older passing
+	// attestation from the same verifier - simulating a cache file written
+	// before the newer (failing) attestation was ever seen.
+	older := signedAttestationAt(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent, "pass", 1)
+	staleCache := cacheFile{Attestations: []nostr.Event{older}}
+	data, err := json.Marshal(staleCache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cachePath, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Load(cachePath); err != nil {
+		t.Fatal(err)
+	}
+	matched := store.AttestationsFor(protocol.AppDeclaration{
+		Repository:   "https://github.com/example/app_ynh",
+		Commit:       testDeclarationCommit,
+		ManifestHash: testDeclarationManifest,
+		ContentHash:  testDeclarationContent,
+	})
+	if len(matched) != 1 || matched[0].Result != "fail" {
+		t.Fatalf("loading a stale cached attestation must not overwrite a newer in-memory one: %+v", matched)
 	}
 }
 
