@@ -88,14 +88,20 @@ real gaps neither the workflow nor its docs mentioned at the time:
    (`quantumrelay_ynh` had one live unquoted-variable bug, `SC2086`,
    underneath all the noise).
 
-4. **No package - including `nostr_catalog_ynh`, the catalog daemon's own
-   repository - has actually wired up the `nostr-ynh attest` signing step
-   yet.** This workflow only produces the unsigned `ci-result.json`.
-   Signing and publishing it as a kind-30080 event (see the `attest` job
-   example under Output below) is a separate, deliberately-not-yet-adopted
-   step requiring its own verifier keypair, distinct from any package's
-   publisher key. Adding `security.yml` alone gets a package exactly as far
-   as every other package currently is - green CI, no attestations yet.
+4. **This workflow only produces the unsigned `ci-result.json` - adopting
+   `security.yml` alone doesn't attest anything.** No package has wired up
+   actual attestation yet. Signing it into a kind-30080 event needs a
+   verifier identity, but that does not have to be a brand-new keypair: the
+   common case (a package operator who already runs a trusted publisher
+   identity, e.g. the same YunoHost server running `nostr-catalogd`) is to
+   self-attest by passing the same `ci-result.json` this workflow produces
+   to `nostr-ynh publish --ci-result <path>`, which builds and publishes
+   the declaration and its attestation together, signed by the same
+   publisher key, in one call - see "Publishing an attestation" in
+   `docs/attestations.md`. A genuinely separate verifier identity (the
+   `attest` job example under Output below) is a different, still-optional
+   path for when the verifier really is a different party than the
+   publisher.
 
 ## Checks
 

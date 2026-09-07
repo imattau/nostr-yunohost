@@ -121,6 +121,9 @@ func runPublish(args []string, out, errOut io.Writer) int {
 	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
 	dryRun := flags.Bool("dry-run", false, "build and sign the event without publishing")
 	jsonOutput := flags.Bool("json", false, "emit one machine-readable JSON result")
+	ciResultPath := flags.String("ci-result", "", "optional path to a ci-result.json (internal/ciresult schema) - when given, also builds and publishes a kind-30080 CI attestation for this exact revision, signed by the same key as the declaration")
+	ciProvider := flags.String("ci-provider", "", "CI system that produced --ci-result, e.g. github-actions (auto-detected on GitHub Actions)")
+	ciRef := flags.String("ci-ref", "", "CI run reference for --ci-result, e.g. a workflow run URL (auto-detected on GitHub Actions)")
 	timeoutSeconds := relayTimeoutFlag(flags)
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -167,15 +170,76 @@ func runPublish(args []string, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "encode app address: %v\n", err)
 		return 1
 	}
+
+	// A CI result attests to a specific revision; it must be built alongside
+	// the declaration it corresponds to, not published independently, or a
+	// stale --ci-result could be signed against whatever repo/ref happens to
+	// be checked out. Same publisher key as the declaration: the publisher
+	// is the one attesting, per docs/attestations.md's "nothing requires
+	// the same server to both publish and verify" - it just doesn't require
+	// them to be different, either, and this is the common case.
+	var attestEvent *nostr.Event
+	var attestAddress string
+	if *ciResultPath != "" {
+		data, err := os.ReadFile(*ciResultPath)
+		if err != nil {
+			fmt.Fprintf(errOut, "read CI result: %v\n", err)
+			return 1
+		}
+		result, err := ciresult.Parse(data)
+		if err != nil {
+			fmt.Fprintf(errOut, "invalid CI result: %v\n", err)
+			return 1
+		}
+		if result.AppID != metadata.AppID || result.Repository != metadata.Repository ||
+			result.Commit != metadata.Commit || result.Manifest != metadata.ManifestHash ||
+			result.Content != metadata.ContentHash {
+			fmt.Fprintln(errOut, "--ci-result does not match the revision being published (app_id/repository/commit/manifest/content); refusing to attest")
+			return 1
+		}
+		provider, ref := *ciProvider, *ciRef
+		if provider == "" || ref == "" {
+			autoProvider, autoRef := githubActionsRun()
+			if provider == "" {
+				provider = autoProvider
+			}
+			if ref == "" {
+				ref = autoRef
+			}
+		}
+		if provider == "" || ref == "" {
+			fmt.Fprintln(errOut, "--ci-result requires --ci-provider and --ci-ref (could not auto-detect a CI run)")
+			return 2
+		}
+		built, err := verification.Build(result.AppID, result.Repository, result.Commit, result.Manifest, result.Content, provider, ref, result.Checks, result.Result, *privateKey)
+		if err != nil {
+			fmt.Fprintf(errOut, "build attestation: %v\n", err)
+			return 1
+		}
+		addr, err := verification.Address(built, relayURLs)
+		if err != nil {
+			fmt.Fprintf(errOut, "encode attestation address: %v\n", err)
+			return 1
+		}
+		attestEvent, attestAddress = &built, addr
+	}
+
 	if *dryRun {
 		if *jsonOutput {
-			return writePublishJSON(out, event, address, nil)
+			return writePublishJSON(out, event, address, nil, attestEvent, attestAddress, nil)
 		}
 		if err := json.NewEncoder(out).Encode(event); err != nil {
 			fmt.Fprintf(errOut, "write event: %v\n", err)
 			return 1
 		}
 		fmt.Fprintf(errOut, "naddr: %s\n", address)
+		if attestEvent != nil {
+			if err := json.NewEncoder(out).Encode(*attestEvent); err != nil {
+				fmt.Fprintf(errOut, "write attestation event: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(errOut, "attestation naddr: %s\n", attestAddress)
+		}
 		return 0
 	}
 	client, err := relay.New(context.Background(), relayURLs)
@@ -186,8 +250,12 @@ func runPublish(args []string, out, errOut io.Writer) int {
 	publishCtx, cancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
 	defer cancel()
 	results := client.Publish(publishCtx, event)
+	var attestResults []relay.PublishResult
+	if attestEvent != nil {
+		attestResults = client.Publish(publishCtx, *attestEvent)
+	}
 	if *jsonOutput {
-		return writePublishJSON(out, event, address, results)
+		return writePublishJSON(out, event, address, results, attestEvent, attestAddress, attestResults)
 	}
 	if err := json.NewEncoder(out).Encode(event); err != nil {
 		fmt.Fprintf(errOut, "write event: %v\n", err)
@@ -203,6 +271,25 @@ func runPublish(args []string, out, errOut io.Writer) int {
 		succeeded++
 		fmt.Fprintf(errOut, "%s: published\n", result.Relay)
 	}
+	if attestEvent != nil {
+		if err := json.NewEncoder(out).Encode(*attestEvent); err != nil {
+			fmt.Fprintf(errOut, "write attestation event: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(errOut, "attestation naddr: %s\n", attestAddress)
+		attestSucceeded := 0
+		for _, result := range attestResults {
+			if result.Error != nil {
+				fmt.Fprintf(errOut, "%s: %v\n", result.Relay, result.Error)
+				continue
+			}
+			attestSucceeded++
+			fmt.Fprintf(errOut, "%s: attestation published\n", result.Relay)
+		}
+		if attestSucceeded == 0 {
+			return 1
+		}
+	}
 	if succeeded == 0 {
 		return 1
 	}
@@ -210,10 +297,11 @@ func runPublish(args []string, out, errOut io.Writer) int {
 }
 
 type publishJSONResult struct {
-	Event     nostr.Event          `json:"event"`
-	Naddr     string               `json:"naddr"`
-	Published bool                 `json:"published"`
-	Relays    []publishRelayResult `json:"relays"`
+	Event       nostr.Event          `json:"event"`
+	Naddr       string               `json:"naddr"`
+	Published   bool                 `json:"published"`
+	Relays      []publishRelayResult `json:"relays"`
+	Attestation *attestJSONResult    `json:"attestation,omitempty"`
 }
 
 type publishRelayResult struct {
@@ -222,7 +310,7 @@ type publishRelayResult struct {
 	Error     string `json:"error,omitempty"`
 }
 
-func writePublishJSON(out io.Writer, event nostr.Event, address string, results []relay.PublishResult) int {
+func writePublishJSON(out io.Writer, event nostr.Event, address string, results []relay.PublishResult, attestEvent *nostr.Event, attestAddress string, attestResults []relay.PublishResult) int {
 	response := publishJSONResult{Event: event, Naddr: address, Relays: []publishRelayResult{}}
 	for _, result := range results {
 		relayResult := publishRelayResult{Relay: result.Relay, Published: result.Error == nil}
@@ -232,10 +320,25 @@ func writePublishJSON(out io.Writer, event nostr.Event, address string, results 
 		response.Relays = append(response.Relays, relayResult)
 		response.Published = response.Published || relayResult.Published
 	}
+	if attestEvent != nil {
+		attestation := attestJSONResult{Event: *attestEvent, Naddr: attestAddress, Relays: []publishRelayResult{}}
+		for _, result := range attestResults {
+			relayResult := publishRelayResult{Relay: result.Relay, Published: result.Error == nil}
+			if result.Error != nil {
+				relayResult.Error = result.Error.Error()
+			}
+			attestation.Relays = append(attestation.Relays, relayResult)
+			attestation.Published = attestation.Published || relayResult.Published
+		}
+		response.Attestation = &attestation
+	}
 	if err := json.NewEncoder(out).Encode(response); err != nil {
 		return 1
 	}
 	if len(results) > 0 && !response.Published {
+		return 1
+	}
+	if response.Attestation != nil && len(attestResults) > 0 && !response.Attestation.Published {
 		return 1
 	}
 	return 0

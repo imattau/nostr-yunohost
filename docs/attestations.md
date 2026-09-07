@@ -97,7 +97,33 @@ without connecting to a relay - the same pattern `nostr-ynh publish
 --dry-run` uses.
 
 The verifier key is a separate identity from the package publisher's key -
-nothing requires the same server to both publish and verify.
+nothing requires the same server to both publish and verify, but nothing
+requires them to be different either. The common case for a package
+operator who already runs a trusted publishing identity - a YunoHost server
+running `nostr-catalogd`, say - is to self-attest with that same key rather
+than stand up a second one: `nostr-ynh publish` accepts `--ci-result`
+directly, building and publishing the declaration and its attestation
+together, signed by the same `--private-key`/`--private-key-file`, in one
+call:
+
+```bash
+nostr-ynh publish \
+  --repo . \
+  --private-key-file publisher.key \
+  --relays wss://relay.example \
+  --ci-result ci-result.json \
+  [--ci-provider github-actions] [--ci-ref <run URL>]
+```
+
+Before signing, this cross-checks `ci-result.json`'s
+`app_id`/`repository`/`commit`/`manifest`/`content` against the declaration
+it just built from the same repository state, and refuses to attest (and
+does not publish either event) on any mismatch - a stale or unrelated CI
+result can never get folded into a valid-looking attestation for whatever
+happens to be checked out. `--ci-provider`/`--ci-ref` auto-detect the same
+way `nostr-ynh attest` does. Standalone `nostr-ynh attest` remains the right
+tool when the verifier genuinely is a separate identity - a third-party CI
+service attesting someone else's package, for instance.
 
 ## Consuming attestations in nostr-catalogd
 
