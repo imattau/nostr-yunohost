@@ -347,6 +347,121 @@ func TestIngestAttestationRejectsMalformedEvent(t *testing.T) {
 	}
 }
 
+func TestWriteSnapshotRequirePolicyExcludesUnattested(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	event := signedEvent(t, publisherKey, "hello_nostr")
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	store.SetAttestationPolicy(trust.AttestationPolicy{Mode: trust.AttestationRequire})
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := store.WriteSnapshot(&output); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(output.Bytes(), []byte(`"hello_nostr"`)) {
+		t.Fatalf("require policy should exclude an app with no attestation: %s", output.String())
+	}
+}
+
+func TestWriteSnapshotRequirePolicyExcludesFailedAttestationOnly(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	verifierKey := strings.Repeat("7", 64)
+	event := signedEvent(t, publisherKey, "hello_nostr")
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	store.SetAttestationPolicy(trust.AttestationPolicy{Mode: trust.AttestationRequire})
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+	failing := signedAttestationAt(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent, "fail", 1)
+	if err := store.IngestAttestation(failing); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := store.WriteSnapshot(&output); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(output.Bytes(), []byte(`"hello_nostr"`)) {
+		t.Fatalf("require policy should exclude an app whose only attestation failed: %s", output.String())
+	}
+}
+
+func TestWriteSnapshotRequirePolicyIncludesAttestedApp(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	verifierKey := strings.Repeat("8", 64)
+	event := signedEvent(t, publisherKey, "hello_nostr")
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	store.SetAttestationPolicy(trust.AttestationPolicy{Mode: trust.AttestationRequire})
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+	passing := signedAttestation(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent)
+	if err := store.IngestAttestation(passing); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := store.WriteSnapshot(&output); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(output.Bytes(), []byte(`"apps":{"hello_nostr"`)) {
+		t.Fatalf("require policy should include an app with a passing attestation: %s", output.String())
+	}
+}
+
+func TestWriteSnapshotOffPolicyIncludesUnattestedApp(t *testing.T) {
+	// The zero-value Store (no SetAttestationPolicy call) must behave
+	// exactly as it did before this policy existed.
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	event := signedEvent(t, publisherKey, "hello_nostr")
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := store.WriteSnapshot(&output); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(output.Bytes(), []byte(`"apps":{"hello_nostr"`)) {
+		t.Fatalf("default (off) policy must not exclude an unattested app: %s", output.String())
+	}
+}
+
 func signedAttestation(t *testing.T, privateKey, appID, repositoryURL, commit, manifestHash, contentHash string) nostr.Event {
 	return signedAttestationAt(t, privateKey, appID, repositoryURL, commit, manifestHash, contentHash, "pass", 1)
 }

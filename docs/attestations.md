@@ -117,21 +117,54 @@ hashes. This is the "never treat an attestation for another revision as
 valid" rule from the plan, applied concretely: repository and commit could
 coincidentally (or maliciously) match while the actual code hash doesn't.
 
-Nothing yet *uses* `AttestationsFor` to change what the generated catalogue
-serves - that's local trust policy (Phase 6, not implemented) and the
-security index (Phase 8, not implemented). Phase 5 only makes attestations
-available; it does not yet gate anything on them.
+`WriteSnapshot` is the only current consumer of `AttestationsFor`, via the
+local trust policy below. The security index (Phase 8, populating
+`SecurityIndex.Apps` with per-check detail) is still not implemented -
+`require` mode today can only exclude or include an app, not explain why on
+the generated `/v3/apps.json` itself.
 
-**Known gap, shared with endorsements:** attestations are only accumulated
-from the live subscription opened at daemon startup - there is no
-historical fetch (no `FetchAttestations` alongside `FetchAppDeclarations`)
-and no persistence across restarts, matching the endorsement subscription's
-existing behavior. A freshly restarted daemon holds zero attestations until
-new ones arrive on relays it's watching. This is fine while nothing depends
-on attestations yet, but should be fixed - a historical fetch and/or cache
-persistence, for both endorsements and attestations - before Phase 6's
-`require` policy ships, or a restart would transiently un-attest every
-package.
+**Known gap, shared with endorsements, now load-bearing:** attestations are
+only accumulated from the live subscription opened at daemon startup -
+there is no historical fetch (no `FetchAttestations` alongside
+`FetchAppDeclarations`) and no persistence across restarts, matching the
+endorsement subscription's existing behavior. Under `require` mode this is
+no longer a cosmetic gap: **restarting the daemon transiently excludes every
+previously attested package** from the generated catalogue until relays
+resend those attestations. Anyone enabling `require` should be aware of
+this before relying on it in production; fixing it (historical fetch and/or
+cache persistence, for both endorsements and attestations) is unfinished
+follow-up work, not part of this phase.
+
+## Local trust policy
+
+`nostr-catalogd --attestation-policy off|prefer|require` (or
+`NOSTR_YNH_ATTESTATION_POLICY`) configures how `WriteSnapshot` uses
+`AttestationsFor`'s result for each declaration it would otherwise include.
+Default is `off`. The acceptance criterion is deliberately simple for the
+MVP: an attestation counts if its overall `result` tag is `pass` - no
+minimum count, no required-checks list, no trusted-verifier allowlist yet
+(`trust.AttestationPolicy`, `internal/trust/attestation_policy.go`
+documents these as an explicitly later extension, plan Phase 12).
+
+| Mode | Unattested declaration | Declaration with a passing attestation |
+| --- | --- | --- |
+| `off` (default) | in catalogue | in catalogue |
+| `prefer` | in catalogue | in catalogue, marked verified |
+| `require` | **excluded** from catalogue | in catalogue, marked verified |
+
+"Marked verified" is only exposed today through the Go API
+(`trust.AttestationPolicy.Evaluate(...).Verified`, and
+`Store.AttestationsFor` directly) - there is no visible field on the
+generated `/v3/apps.json` yet distinguishing a verified app from an
+unverified one admitted under `off`/`prefer`. That surface is Phase 8's
+security index and Phase 9's admin UI, neither implemented yet; `require`'s
+exclusion is the only externally visible effect right now.
+
+This flag is unrelated to the existing `--attestation-ledger`/
+`--publisher-key-file` flags: those configure this server's own kind-30079
+curator endorsements of apps it installed (`internal/attestation`), a
+completely different, older feature that happens to share the word
+"attestation" in its name.
 
 ## Relationship to endorsements
 

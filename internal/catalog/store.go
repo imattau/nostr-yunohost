@@ -167,6 +167,10 @@ type Store struct {
 	// Phase 12), while a later event from the same verifier for the same
 	// revision replaces its earlier one.
 	attestations map[string]map[string]attestationRecord
+	// attestationPolicy is applied in WriteSnapshot. Its zero value is
+	// trust.AttestationOff, so an unconfigured daemon behaves exactly as it
+	// did before this policy existed.
+	attestationPolicy trust.AttestationPolicy
 }
 
 // SetCurationPolicy enables trusted-curator selection for duplicate app IDs.
@@ -174,6 +178,14 @@ func (s *Store) SetCurationPolicy(policy curation.Policy) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.curationPolicy = &policy
+}
+
+// SetAttestationPolicy configures how CI-backed attestations affect the
+// generated catalogue (docs/attestation-trust-policy-plan.md Phase 6).
+func (s *Store) SetAttestationPolicy(policy trust.AttestationPolicy) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.attestationPolicy = policy
 }
 
 func NewStore(policy trust.ExplicitPublishers) *Store {
@@ -296,9 +308,16 @@ func (s *Store) IngestAttestation(event nostr.Event) error {
 // "never treat an attestation for another revision as valid" rules out, and
 // the shape a forged or simply stale attestation would take.
 func (s *Store) AttestationsFor(declaration protocol.AppDeclaration) []verification.Attestation {
-	key := attestationKey(declaration.Repository, declaration.Commit)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.attestationsForLocked(declaration)
+}
+
+// attestationsForLocked is AttestationsFor's implementation, callable by
+// WriteSnapshot without recursively RLock-ing the same non-reentrant mutex
+// it's already holding for the whole snapshot build.
+func (s *Store) attestationsForLocked(declaration protocol.AppDeclaration) []verification.Attestation {
+	key := attestationKey(declaration.Repository, declaration.Commit)
 	byVerifier := s.attestations[key]
 	if len(byVerifier) == 0 {
 		return nil
@@ -459,6 +478,15 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 					}
 				}
 			}
+		}
+		// Phase 6: under AttestationRequire, a declaration without an
+		// acceptable attestation for its exact revision is excluded from
+		// the generated catalogue entirely - discoverable via other means
+		// (e.g. Declarations/Snapshot), just not offered to the YunoHost
+		// installer. Off and Prefer always accept, so this is a no-op
+		// until an administrator opts into Require.
+		if !s.attestationPolicy.Evaluate(s.attestationsForLocked(selected.Declaration)).Accepted {
+			continue
 		}
 		app, err := TranslateWithBranch(selected.Declaration, selected.Manifest, selected.LogoHash, selected.Branch, int64(selected.CreatedAt))
 		if err != nil {

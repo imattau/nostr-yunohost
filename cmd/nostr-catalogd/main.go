@@ -37,6 +37,13 @@ func main() {
 	publisherKeyFile := flag.String("publisher-key-file", os.Getenv("NOSTR_YNH_PUBLISHER_KEY_FILE"), "path to this server's own signing key (enables the attestation admin page)")
 	installedAppsFile := flag.String("installed-apps-file", os.Getenv("NOSTR_YNH_INSTALLED_APPS_FILE"), "path to the privileged helper's installed-app snapshot")
 	attestationLedgerFile := flag.String("attestation-ledger", os.Getenv("NOSTR_YNH_ATTESTATION_LEDGER"), "path to the local record of attestations this server has already published")
+	// attestationPolicyFlag is unrelated to attestation-ledger/publisher-key-file
+	// above: those configure this server's own kind-30079 curator
+	// endorsements of apps it installed (internal/attestation), while this
+	// flag configures how kind-30080 CI-backed attestations from any
+	// verifier (internal/verification) affect the generated catalogue - see
+	// docs/attestation-trust-policy-plan.md Phase 6 and docs/attestations.md.
+	attestationPolicyFlag := flag.String("attestation-policy", os.Getenv("NOSTR_YNH_ATTESTATION_POLICY"), "how CI-backed attestations affect the generated catalogue: off, prefer, or require (default off)")
 	flag.Parse()
 	if *versionFlag {
 		fmt.Println(version)
@@ -62,6 +69,11 @@ func main() {
 		}
 		store.SetCurationPolicy(curationPolicy)
 	}
+	attestationMode, err := trust.ParseAttestationMode(*attestationPolicyFlag)
+	if err != nil {
+		log.Fatal(err)
+	}
+	store.SetAttestationPolicy(trust.AttestationPolicy{Mode: attestationMode})
 	if err := store.Load(*cachePath); err != nil {
 		log.Printf("load catalogue cache: %v", err)
 	}
