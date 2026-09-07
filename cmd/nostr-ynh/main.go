@@ -51,6 +51,8 @@ func run(args []string, out, errOut io.Writer) int {
 		return runEndorse(args[1:], out, errOut)
 	case "attest":
 		return runAttest(args[1:], out, errOut)
+	case "reverify":
+		return runReverify(args[1:], out, errOut)
 	case "catalog":
 		return runCatalog(args[1:], out, errOut)
 	case "preview":
@@ -382,7 +384,7 @@ func runInspect(args []string, out, errOut io.Writer) int {
 	}
 	fetchCtx, cancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
 	defer cancel()
-	event, err := client.FetchReplaceable(fetchCtx, pointer.PublicKey, pointer.Identifier)
+	event, err := client.FetchReplaceable(fetchCtx, protocol.AppDeclarationKind, pointer.PublicKey, pointer.Identifier)
 	if err != nil {
 		fmt.Fprintf(errOut, "fetch declaration: %v\n", err)
 		return 1
@@ -667,6 +669,195 @@ func writeAttestJSON(out io.Writer, event nostr.Event, address string, results [
 	return 0
 }
 
+// runReverify independently re-checks a published attestation instead of
+// trusting it: it re-fetches the attestation and the declaration it claims
+// to cover from relays, cross-checks their app_id/repo/commit/manifest/
+// content against each other, then clones the repository fresh at the
+// attested commit and recomputes both hashes - the same repository.
+// VerifyDeclaration path `publish` itself uses, just fed the attestation's
+// claims instead of a local checkout. This is the "just in case the
+// original has been manipulated" check: it catches a repo rewritten after
+// attestation, or a declaration republished pointing at a different commit
+// than what was attested, without requiring a second signing identity -
+// see docs/attestations.md.
+//
+// The declaration is looked up under the attestation's own verifier pubkey,
+// matching the self-attestation model (publish --ci-result signs both
+// events with the same key): a future design with a separate verifier
+// identity would need an explicit --publisher flag here instead.
+func runReverify(args []string, out, errOut io.Writer) int {
+	flags := flag.NewFlagSet("reverify", flag.ContinueOnError)
+	flags.SetOutput(errOut)
+	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
+	jsonOutput := flags.Bool("json", false, "emit machine-readable JSON")
+	timeoutSeconds := relayTimeoutFlag(flags)
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if *timeoutSeconds <= 0 {
+		fmt.Fprintln(errOut, "timeout-seconds must be positive")
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(errOut, "usage: nostr-ynh reverify [--json] [--relays <ws://...,...>] [--timeout-seconds <n>] <attestation-naddr>")
+		return 2
+	}
+	prefix, value, err := nip19.Decode(flags.Arg(0))
+	if err != nil || prefix != "naddr" {
+		fmt.Fprintf(errOut, "decode naddr: %v\n", err)
+		return 1
+	}
+	pointer, ok := value.(nostr.EntityPointer)
+	if !ok || pointer.Kind != verification.AttestationKind {
+		fmt.Fprintln(errOut, "naddr does not point to a CI attestation")
+		return 1
+	}
+	relayURLs := splitNonEmpty(*relayList)
+	if len(relayURLs) == 0 {
+		relayURLs = pointer.Relays
+	}
+	if len(relayURLs) == 0 {
+		fmt.Fprintln(errOut, "reverify requires --relays (or relay hints in the naddr)")
+		return 2
+	}
+	client, err := relay.New(context.Background(), relayURLs)
+	if err != nil {
+		fmt.Fprintf(errOut, "configure relays: %v\n", err)
+		return 1
+	}
+
+	fetchCtx, cancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
+	defer cancel()
+	attestationEvent, err := client.FetchReplaceable(fetchCtx, verification.AttestationKind, pointer.PublicKey, pointer.Identifier)
+	if err != nil {
+		fmt.Fprintf(errOut, "fetch attestation: %v\n", err)
+		return 1
+	}
+	if err := protocol.VerifyID(*attestationEvent); err != nil {
+		fmt.Fprintf(errOut, "invalid attestation event ID: %v\n", err)
+		return 1
+	}
+	if err := protocol.VerifySignature(*attestationEvent); err != nil {
+		fmt.Fprintf(errOut, "invalid attestation signature: %v\n", err)
+		return 1
+	}
+	attestation, err := verification.Parse(*attestationEvent)
+	if err != nil {
+		fmt.Fprintf(errOut, "invalid attestation: %v\n", err)
+		return 1
+	}
+
+	declarationEvent, err := client.FetchReplaceable(fetchCtx, protocol.AppDeclarationKind, attestation.Verifier, attestation.AppID)
+	if err != nil {
+		fmt.Fprintf(errOut, "fetch declaration: %v\n", err)
+		return 1
+	}
+	if err := protocol.VerifyID(*declarationEvent); err != nil {
+		fmt.Fprintf(errOut, "invalid declaration event ID: %v\n", err)
+		return 1
+	}
+	if err := protocol.VerifySignature(*declarationEvent); err != nil {
+		fmt.Fprintf(errOut, "invalid declaration signature: %v\n", err)
+		return 1
+	}
+	declaration, err := protocol.ParseAppDeclaration(*declarationEvent)
+	if err != nil {
+		fmt.Fprintf(errOut, "invalid declaration: %v\n", err)
+		return 1
+	}
+
+	cloneCtx, cloneCancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
+	defer cloneCancel()
+	result := reverify(cloneCtx, attestation, declaration)
+
+	if *jsonOutput {
+		if err := json.NewEncoder(out).Encode(result); err != nil {
+			fmt.Fprintf(errOut, "write result: %v\n", err)
+			return 1
+		}
+		if !result.Match {
+			return 1
+		}
+		return 0
+	}
+
+	fmt.Fprintf(out, "app: %s\nrepository: %s\ncommit: %s\npublisher/verifier: %s\nattested result: %s\n", attestation.AppID, attestation.Repository, attestation.Commit, attestation.Verifier, attestation.Result)
+	if result.Match {
+		fmt.Fprintln(out, "MATCH: declaration, attestation, and a fresh clone of the repository all agree")
+		return 0
+	}
+	fmt.Fprintln(out, "MISMATCH:")
+	for _, mismatch := range result.Mismatches {
+		fmt.Fprintf(out, "  - %s\n", mismatch)
+	}
+	return 1
+}
+
+type reverifyJSONResult struct {
+	AppID      string            `json:"app_id"`
+	Repository string            `json:"repository"`
+	Commit     string            `json:"commit"`
+	Publisher  string            `json:"publisher"`
+	Verifier   string            `json:"verifier"`
+	Result     string            `json:"result"`
+	Checks     map[string]string `json:"checks"`
+	Match      bool              `json:"match"`
+	Mismatches []string          `json:"mismatches,omitempty"`
+}
+
+// reverify cross-checks a parsed attestation against the declaration it
+// claims to cover, then re-clones the repository fresh at the attested
+// commit to recompute both hashes independently - split out from
+// runReverify so the comparison logic is testable without a live relay
+// round trip (see reverify_test.go).
+func reverify(ctx context.Context, attestation verification.Attestation, declaration protocol.AppDeclaration) reverifyJSONResult {
+	var mismatches []string
+	if declaration.AppID != attestation.AppID {
+		mismatches = append(mismatches, fmt.Sprintf("app_id: declaration=%q attestation=%q", declaration.AppID, attestation.AppID))
+	}
+	if declaration.Repository != attestation.Repository {
+		mismatches = append(mismatches, fmt.Sprintf("repository: declaration=%q attestation=%q", declaration.Repository, attestation.Repository))
+	}
+	if declaration.Commit != attestation.Commit {
+		mismatches = append(mismatches, fmt.Sprintf("commit: declaration=%q attestation=%q", declaration.Commit, attestation.Commit))
+	}
+	if declaration.ManifestHash != attestation.ManifestHash {
+		mismatches = append(mismatches, fmt.Sprintf("manifest: declaration=%q attestation=%q", declaration.ManifestHash, attestation.ManifestHash))
+	}
+	if declaration.ContentHash != attestation.ContentHash {
+		mismatches = append(mismatches, fmt.Sprintf("content: declaration=%q attestation=%q", declaration.ContentHash, attestation.ContentHash))
+	}
+
+	// Re-clone the repository fresh at the attested commit and recompute
+	// both hashes, independent of whatever the declaration/attestation
+	// events merely claim - this is what actually catches a repo rewritten
+	// after attestation. repository.VerifyDeclaration only reads
+	// Repository/Commit/ManifestHash/ContentHash off the struct, so the
+	// attestation's own claims are fed in directly rather than the
+	// declaration's, in case those two already disagree above.
+	claimed := protocol.AppDeclaration{
+		Repository:   attestation.Repository,
+		Commit:       attestation.Commit,
+		ManifestHash: attestation.ManifestHash,
+		ContentHash:  attestation.ContentHash,
+	}
+	if _, verifyErr := repository.VerifyDeclaration(ctx, claimed); verifyErr != nil {
+		mismatches = append(mismatches, fmt.Sprintf("repository content: %v", verifyErr))
+	}
+
+	return reverifyJSONResult{
+		AppID:      attestation.AppID,
+		Repository: attestation.Repository,
+		Commit:     attestation.Commit,
+		Publisher:  declaration.Publisher,
+		Verifier:   attestation.Verifier,
+		Result:     attestation.Result,
+		Checks:     attestation.Checks,
+		Match:      len(mismatches) == 0,
+		Mismatches: mismatches,
+	}
+}
+
 // defaultCatalogBudgetSeconds bounds the *entire* per-app verification loop
 // in runCatalog, not just one app's git clone. Each declared app gets its
 // own fresh --timeout-seconds deadline so one dead repo doesn't consume the
@@ -850,6 +1041,7 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "  nostr-ynh inspect [--json] [--relays <ws://...,...>] [--timeout-seconds <n>] <naddr>")
 	fmt.Fprintln(out, "  nostr-ynh endorse [--claim recommend|tested] [--comment <text>] [--private-key <hex>|--private-key-file <path>] [--relays <ws://...,...>] [--timeout-seconds <n>] <naddr>")
 	fmt.Fprintln(out, "  nostr-ynh attest --ci-result <path> [--ci-provider <name>] [--ci-ref <ref>] --private-key <hex>|--private-key-file <path> --relays <ws://...,...> [--dry-run] [--json] [--timeout-seconds <n>]")
+	fmt.Fprintln(out, "  nostr-ynh reverify [--json] [--relays <ws://...,...>] [--timeout-seconds <n>] <attestation-naddr>")
 	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...> [--timeout-seconds <n>] [--budget-seconds <n>]")
 	fmt.Fprintln(out, "  nostr-ynh preview [--ref <branch|tag|commit>] <repository-url>")
 	fmt.Fprintln(out, "  nostr-ynh keygen")

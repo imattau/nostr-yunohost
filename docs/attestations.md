@@ -125,6 +125,48 @@ way `nostr-ynh attest` does. Standalone `nostr-ynh attest` remains the right
 tool when the verifier genuinely is a separate identity - a third-party CI
 service attesting someone else's package, for instance.
 
+## Independently re-checking a published attestation
+
+Self-attestation (above) is convenient, but it means the daemon's default
+trust model is "believe whatever the publisher's key signed." `nostr-ynh
+reverify` is the trust-but-verify counterpart: given a published
+attestation's `naddr`, it re-derives everything from scratch instead of
+reading the attestation's claims at face value.
+
+```bash
+nostr-ynh reverify \
+  --relays wss://relay.example \
+  [--json] \
+  naddr1...
+```
+
+It: fetches the attestation event and, under the same pubkey (the
+self-attestation model signs both with one key - see above), the
+declaration it claims to cover; cross-checks their `app_id`/`repo`/
+`commit`/`manifest`/`content` against each other; then clones the
+repository fresh at the attested commit and recomputes both hashes,
+independent of anything either event merely asserts. It prints `MATCH` or a
+`MISMATCH` list (`--json` gives a `{"match": bool, "mismatches": [...]}`
+result with a nonzero exit code on mismatch), so it scripts as a periodic
+check or a manual spot-check on any app in the catalogue - not just your
+own.
+
+This catches: a repository whose branch/tag has been force-pushed to
+different content since it was attested; a declaration silently republished
+pointing at a different commit than what was actually tested; or an
+attestation whose claimed hashes never matched the real repository content
+in the first place (a compromised CI job, or a publisher key signing a
+false claim) - none of which a signature check alone can see, since the
+signature only proves who signed, not that what they signed was true.
+
+What it does *not* catch: it does not re-run the underlying checks
+(`package_linter`, `shellcheck`, ...) themselves, so a publisher whose CI
+setup is broken or lax but whose signed claims are internally consistent
+still reads as `MATCH`. Re-running the actual check suite against the
+fresh clone is a natural follow-on (tracked, not yet built) rather than
+something `reverify` does today - this first pass is deliberately just the
+"has anything been tampered with since attestation" check, run manually.
+
 ## Consuming attestations in nostr-catalogd
 
 `nostr-catalogd` subscribes to attestation events unconditionally (unlike

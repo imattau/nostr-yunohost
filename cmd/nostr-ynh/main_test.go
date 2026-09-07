@@ -106,6 +106,23 @@ func TestRunInspectRespectsTimeoutAgainstAHungRelay(t *testing.T) {
 	}
 }
 
+func TestRunReverifyRespectsTimeoutAgainstAHungRelay(t *testing.T) {
+	relayURL := startBlackholeRelay(t)
+	naddr, err := nip19.EncodeEntity(strings.Repeat("ab", 32), verification.AttestationKind, "example-app:"+strings.Repeat("f", 40), nil)
+	if err != nil {
+		t.Fatalf("encode naddr: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+
+	start := time.Now()
+	runReverify([]string{"--relays", relayURL, "--timeout-seconds", "1", naddr}, &stdout, &stderr)
+	elapsed := time.Since(start)
+
+	if elapsed > 5*time.Second {
+		t.Fatalf("runReverify blocked for %s against an unresponsive relay; want it bounded by --timeout-seconds (1s)", elapsed)
+	}
+}
+
 func writeTestCIResult(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ci-result.json")

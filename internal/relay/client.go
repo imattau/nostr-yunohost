@@ -50,17 +50,20 @@ type PublishResult struct {
 	Error error
 }
 
-// FetchReplaceable retrieves the latest declaration for a publisher/app pair
-// using the SDK's replaceable-event handling.
-func (c *Client) FetchReplaceable(ctx context.Context, publisher, appID string) (*nostr.Event, error) {
+// FetchReplaceable retrieves the latest parameterised-replaceable event of
+// kind authored by publisher with the given "d" tag identifier, using the
+// SDK's replaceable-event handling. Works for any addressable kind this
+// package deals with (app declarations, d=app_id; attestations,
+// d=app_id:commit; ...).
+func (c *Client) FetchReplaceable(ctx context.Context, kind int, publisher, identifier string) (*nostr.Event, error) {
 	results := c.pool.FetchManyReplaceable(ctx, c.urls, nostr.Filter{
-		Kinds:   []int{protocol.AppDeclarationKind},
+		Kinds:   []int{kind},
 		Authors: []string{publisher},
-		Tags:    nostr.TagMap{"d": {appID}},
+		Tags:    nostr.TagMap{"d": {identifier}},
 	})
-	event, ok := results.Load(nostr.ReplaceableKey{PubKey: publisher, D: appID})
+	event, ok := results.Load(nostr.ReplaceableKey{PubKey: publisher, D: identifier})
 	if !ok {
-		return nil, fmt.Errorf("app declaration not found")
+		return nil, fmt.Errorf("event not found")
 	}
 	return event, nil
 }
