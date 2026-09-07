@@ -8,9 +8,9 @@ import (
 	"net/url"
 	"sync"
 
+	"github.com/imattau/nostr-yunohost/internal/protocol"
+	"github.com/imattau/nostr-yunohost/internal/verification"
 	"github.com/nbd-wtf/go-nostr"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/verification"
 )
 
 // Client publishes and subscribes through a configured set of relays.

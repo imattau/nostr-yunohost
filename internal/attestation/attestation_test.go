@@ -11,10 +11,10 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/imattau/nostr-yunohost/internal/localstate"
+	"github.com/imattau/nostr-yunohost/internal/protocol"
+	"github.com/imattau/nostr-yunohost/internal/relay"
 	"github.com/nbd-wtf/go-nostr"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/localstate"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/relay"
 )
 
 const (

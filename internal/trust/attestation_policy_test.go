@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/imattau/nostr-yunohost/internal/verification"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/verification"
 )
 
 func TestParseAttestationMode(t *testing.T) {

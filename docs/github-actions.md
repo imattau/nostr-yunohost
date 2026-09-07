@@ -24,7 +24,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: nostr-yunohost/nostr-yunohost@main
+      - uses: imattau/nostr-yunohost@main
         with:
           relays: wss://relay.example-a,wss://relay.example-b
           private-key: ${{ secrets.NOSTR_YNH_PUBLISHING_KEY }}

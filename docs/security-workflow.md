@@ -40,7 +40,7 @@ on:
 
 jobs:
   static-security:
-    uses: nostr-yunohost/nostr-yunohost/.github/workflows/static-security.yml@main
+    uses: imattau/nostr-yunohost/.github/workflows/static-security.yml@main
 ```
 
 The workflow checks out the calling repository, so it must run from a
@@ -93,7 +93,7 @@ the existing publish action in `action.yml`) can consume the artifact:
 ```yaml
 jobs:
   static-security:
-    uses: nostr-yunohost/nostr-yunohost/.github/workflows/static-security.yml@main
+    uses: imattau/nostr-yunohost/.github/workflows/static-security.yml@main
 
   attest:
     needs: static-security
@@ -107,7 +107,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-      - run: go install github.com/nostr-yunohost/nostr-yunohost/cmd/nostr-ynh@main
+      - run: go install github.com/imattau/nostr-yunohost/cmd/nostr-ynh@main
       - run: |
           "$(go env GOPATH)/bin/nostr-ynh" attest \
             --ci-result ci-result.json \

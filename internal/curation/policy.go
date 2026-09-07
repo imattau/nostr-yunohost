@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/imattau/nostr-yunohost/internal/protocol"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
 )
 
 // Policy defines the trusted curator set and endorsement threshold.

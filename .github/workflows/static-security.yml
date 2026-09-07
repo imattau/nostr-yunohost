@@ -13,7 +13,7 @@ name: Static package security checks
 #
 #   jobs:
 #     static-security:
-#       uses: nostr-yunohost/nostr-yunohost/.github/workflows/static-security.yml@main
+#       uses: imattau/nostr-yunohost/.github/workflows/static-security.yml@main
 
 on:
   workflow_call:
@@ -48,7 +48,7 @@ jobs:
 
       - name: Install nostr-ynh
         shell: bash
-        run: go install "github.com/nostr-yunohost/nostr-yunohost/cmd/nostr-ynh@${{ inputs.nostr-yunohost-version }}"
+        run: go install "github.com/imattau/nostr-yunohost/cmd/nostr-ynh@${{ inputs.nostr-yunohost-version }}"
 
       # Doubles as manifest validation: ReadMetadata (internal/repository)
       # rejects a missing/malformed manifest.toml or one without id/version

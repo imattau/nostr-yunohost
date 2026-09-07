@@ -12,13 +12,13 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/imattau/nostr-yunohost/internal/curation"
+	"github.com/imattau/nostr-yunohost/internal/protocol"
+	"github.com/imattau/nostr-yunohost/internal/repository"
+	"github.com/imattau/nostr-yunohost/internal/trust"
+	"github.com/imattau/nostr-yunohost/internal/verification"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/curation"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/repository"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/verification"
 )
 
 type record struct {

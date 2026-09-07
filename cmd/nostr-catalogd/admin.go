@@ -7,9 +7,9 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/nostr-yunohost/nostr-yunohost/internal/attestation"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/catalog"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/localstate"
+	"github.com/imattau/nostr-yunohost/internal/attestation"
+	"github.com/imattau/nostr-yunohost/internal/catalog"
+	"github.com/imattau/nostr-yunohost/internal/localstate"
 )
 
 //go:embed admin_static/index.html

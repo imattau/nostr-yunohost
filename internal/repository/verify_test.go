@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/publisher"
+	"github.com/imattau/nostr-yunohost/internal/protocol"
+	"github.com/imattau/nostr-yunohost/internal/publisher"
 )
 
 func TestVerifyCheckedOutDirectory(t *testing.T) {

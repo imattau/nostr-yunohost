@@ -15,8 +15,8 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 
-	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/verification"
+	"github.com/imattau/nostr-yunohost/internal/protocol"
+	"github.com/imattau/nostr-yunohost/internal/verification"
 )
 
 // startBlackholeRelay starts a relay that completes the WebSocket handshake

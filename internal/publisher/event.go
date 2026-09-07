@@ -9,9 +9,9 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/imattau/nostr-yunohost/internal/protocol"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
 )
 
 // Metadata is the publisher-side input required to create an app declaration.

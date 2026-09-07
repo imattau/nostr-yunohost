@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/nostr-yunohost/nostr-yunohost/internal/verification"
+	"github.com/imattau/nostr-yunohost/internal/verification"
 )
 
 // AttestationMode is the local administrator's policy for how CI-backed

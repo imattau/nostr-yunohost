@@ -29,5 +29,5 @@ runs:
         NOSTR_YNH_RELAYS: ${{ inputs.relays }}
       run: |
         set -euo pipefail
-        go install "github.com/nostr-yunohost/nostr-yunohost/cmd/nostr-ynh@${{ inputs.nostr-yunohost-version }}"
+        go install "github.com/imattau/nostr-yunohost/cmd/nostr-ynh@${{ inputs.nostr-yunohost-version }}"
         "$(go env GOPATH)/bin/nostr-ynh" publish --repo "${{ inputs.repository }}"

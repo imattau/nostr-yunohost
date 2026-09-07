@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nostr-yunohost/nostr-yunohost/internal/publisher"
+	"github.com/imattau/nostr-yunohost/internal/publisher"
 )
 
 func TestReadMetadata(t *testing.T) {

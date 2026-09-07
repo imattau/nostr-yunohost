@@ -1,4 +1,4 @@
-module github.com/nostr-yunohost/nostr-yunohost
+module github.com/imattau/nostr-yunohost
 
 go 1.24.1
 

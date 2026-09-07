@@ -3,7 +3,7 @@ package publisher
 import (
 	"testing"
 
-	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
+	"github.com/imattau/nostr-yunohost/internal/protocol"
 )
 
 func TestBuildDeclarationUsesSDKSigning(t *testing.T) {

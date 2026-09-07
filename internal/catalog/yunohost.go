@@ -3,9 +3,9 @@ package catalog
 import (
 	"fmt"
 
+	"github.com/imattau/nostr-yunohost/internal/protocol"
+	"github.com/imattau/nostr-yunohost/internal/verification"
 	"github.com/nbd-wtf/go-nostr/nip19"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/verification"
 )
 
 // YunoHostCatalog is the top-level shape used by the v3 application catalog.

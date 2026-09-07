@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/imattau/nostr-yunohost/internal/protocol"
 	"github.com/nbd-wtf/go-nostr"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
 )
 
 // EndorsementKind is provisional until the event is registered/documented.

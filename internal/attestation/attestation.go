@@ -14,11 +14,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nostr-yunohost/nostr-yunohost/internal/catalog"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/curation"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/localstate"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/relay"
+	"github.com/imattau/nostr-yunohost/internal/catalog"
+	"github.com/imattau/nostr-yunohost/internal/curation"
+	"github.com/imattau/nostr-yunohost/internal/localstate"
+	"github.com/imattau/nostr-yunohost/internal/protocol"
+	"github.com/imattau/nostr-yunohost/internal/relay"
 )
 
 // Candidate is an installed app this server could attest to: it was

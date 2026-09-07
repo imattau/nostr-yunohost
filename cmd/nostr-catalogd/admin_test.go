@@ -12,10 +12,10 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 
-	"github.com/nostr-yunohost/nostr-yunohost/internal/attestation"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/catalog"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/relay"
-	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
+	"github.com/imattau/nostr-yunohost/internal/attestation"
+	"github.com/imattau/nostr-yunohost/internal/catalog"
+	"github.com/imattau/nostr-yunohost/internal/relay"
+	"github.com/imattau/nostr-yunohost/internal/trust"
 )
 
 const (
