@@ -139,10 +139,10 @@ func comparePackageVersions(left, right string) int {
 }
 
 // maxRevisionsPerKey bounds how many distinct-commit revisions this store
-// keeps per publisher/app pair (see upsertRevision). Far more than any
-// legitimate publisher should have pending unattested at once; it exists to
-// cap memory from a publisher that republishes many distinct commits in a
-// short window, not to model a real release cadence.
+// keeps per publisher/app pair (see upsertRevision/capRevisionsLocked). Far
+// more than any legitimate publisher should have pending unattested at
+// once; it exists to cap memory from a publisher that republishes many
+// distinct commits in a short window, not to model a real release cadence.
 const maxRevisionsPerKey = 10
 
 // upsertRevision inserts or updates incoming within revisions (all sharing
@@ -155,7 +155,9 @@ const maxRevisionsPerKey = 10
 // entry"). Revisions sharing a commit are still deduplicated exactly as a
 // single-record store would: a same-commit re-publish only replaces the
 // stored copy when strictly newer. Returned slice is sorted newest-first
-// by CreatedAt and capped at maxRevisionsPerKey.
+// by CreatedAt. Capping to maxRevisionsPerKey is capRevisionsLocked's job,
+// not this function's - trimming correctly needs attestation state this
+// pure function doesn't have.
 func upsertRevision(revisions []record, incoming record) []record {
 	for i, existing := range revisions {
 		if existing.Declaration.Commit != incoming.Declaration.Commit {
@@ -170,10 +172,35 @@ func upsertRevision(revisions []record, incoming record) []record {
 	}
 	revisions = append(revisions, incoming)
 	sort.Slice(revisions, func(a, b int) bool { return revisions[a].CreatedAt > revisions[b].CreatedAt })
-	if len(revisions) > maxRevisionsPerKey {
-		revisions = revisions[:maxRevisionsPerKey]
-	}
 	return revisions
+}
+
+// capRevisionsLocked trims revisions (newest-first) to maxRevisionsPerKey,
+// but never evicts a revision beyond the cutoff that the current
+// attestation policy would still accept - trimming blindly by recency
+// alone reopened Phase 11's exact bug through a different door: enough
+// unattested republishes (more than maxRevisionsPerKey) would otherwise
+// evict an already-attested older revision the store was actively relying
+// on as WriteSnapshot's fallback, silently un-pinning a trusted revision
+// through eviction instead of overwrite. Only the single newest such
+// revision is kept (there is only ever one selectAcceptedRevisionLocked
+// would currently choose), so the list can grow to at most
+// maxRevisionsPerKey+1, not unbounded.
+func (s *Store) capRevisionsLocked(revisions []record) []record {
+	if len(revisions) <= maxRevisionsPerKey {
+		return revisions
+	}
+	kept := revisions[:maxRevisionsPerKey]
+	for _, r := range revisions[maxRevisionsPerKey:] {
+		if r.Manifest == nil {
+			continue
+		}
+		if s.attestationPolicy.Evaluate(s.attestationsForLocked(r.Declaration)).Accepted {
+			kept = append(kept, r)
+			break
+		}
+	}
+	return kept
 }
 
 // attestationRecord pairs a stored attestation with the full signed event it
@@ -254,7 +281,7 @@ func (s *Store) Ingest(event nostr.Event) error {
 	key := declaration.Publisher + "\x00" + declaration.AppID
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entries[key] = upsertRevision(s.entries[key], record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt})
+	s.entries[key] = s.capRevisionsLocked(upsertRevision(s.entries[key], record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt}))
 	return nil
 }
 
@@ -286,7 +313,7 @@ func (s *Store) IngestVerifiedPackage(ctx context.Context, event nostr.Event, ve
 	incoming := record{Event: event, Declaration: declaration, CreatedAt: event.CreatedAt, Manifest: verified.Manifest, Logo: verified.Logo, LogoHash: logoHash, Branch: verified.Branch}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entries[key] = upsertRevision(s.entries[key], incoming)
+	s.entries[key] = s.capRevisionsLocked(upsertRevision(s.entries[key], incoming))
 	return nil
 }
 
@@ -548,6 +575,24 @@ func (s *Store) Load(path string) error {
 	if err := json.Unmarshal(data, &cached); err != nil {
 		return fmt.Errorf("decode catalogue cache: %w", err)
 	}
+	// Attestations are restored before declarations, deliberately: entries'
+	// loop below runs each incoming revision through capRevisionsLocked,
+	// which needs s.attestations already populated to correctly identify
+	// (and protect from eviction) whichever revision the attestation
+	// policy currently accepts. Loading them in the other order would
+	// evaluate every revision as unattested and could re-evict on load the
+	// very revision capRevisionsLocked was protecting when the cache was
+	// written.
+	for _, event := range cached.Attestations {
+		parsed, err := verification.Parse(event)
+		if err != nil {
+			continue
+		}
+		// Load, like the rest of its own writes to s.entries below, runs
+		// without s.mu - callers load a store before any concurrent access
+		// begins (see cmd/nostr-catalogd/main.go).
+		s.storeAttestationLocked(event, parsed)
+	}
 	for _, entry := range cached.Entries {
 		declaration, err := s.policy.Validate(entry.Event)
 		if err != nil {
@@ -565,17 +610,7 @@ func (s *Store) Load(path string) error {
 			branch = "main"
 		}
 		incoming := record{Event: entry.Event, Declaration: declaration, CreatedAt: entry.Event.CreatedAt, Manifest: entry.Manifest, Logo: entry.Logo, LogoHash: entry.LogoHash, Branch: branch}
-		s.entries[key] = upsertRevision(s.entries[key], incoming)
-	}
-	for _, event := range cached.Attestations {
-		parsed, err := verification.Parse(event)
-		if err != nil {
-			continue
-		}
-		// Load, like the rest of its own writes to s.entries above, runs
-		// without s.mu - callers load a store before any concurrent access
-		// begins (see cmd/nostr-catalogd/main.go).
-		s.storeAttestationLocked(event, parsed)
+		s.entries[key] = s.capRevisionsLocked(upsertRevision(s.entries[key], incoming))
 	}
 	return nil
 }

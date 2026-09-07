@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -888,7 +889,10 @@ func TestUpsertRevisionKeepsDistinctCommitsNewestFirst(t *testing.T) {
 	}
 }
 
-func TestUpsertRevisionCapsAtMaxRevisionsPerKey(t *testing.T) {
+func TestUpsertRevisionDoesNotCapItself(t *testing.T) {
+	// Capping is capRevisionsLocked's job (it needs attestation state
+	// upsertRevision doesn't have) - upsertRevision itself keeps every
+	// distinct commit unconditionally.
 	var revisions []record
 	for i := 0; i < maxRevisionsPerKey+5; i++ {
 		revisions = upsertRevision(revisions, record{
@@ -896,12 +900,132 @@ func TestUpsertRevisionCapsAtMaxRevisionsPerKey(t *testing.T) {
 			CreatedAt:   nostr.Timestamp(i),
 		})
 	}
-	if len(revisions) != maxRevisionsPerKey {
-		t.Fatalf("expected the revision list capped at %d, got %d", maxRevisionsPerKey, len(revisions))
+	if len(revisions) != maxRevisionsPerKey+5 {
+		t.Fatalf("expected upsertRevision to keep every distinct commit uncapped, got %d", len(revisions))
 	}
-	// The cap must keep the newest, not the oldest.
 	if revisions[0].CreatedAt != nostr.Timestamp(maxRevisionsPerKey+4) {
-		t.Fatalf("expected the cap to retain the newest revisions, got newest CreatedAt=%d", revisions[0].CreatedAt)
+		t.Fatalf("expected newest-first ordering, got newest CreatedAt=%d", revisions[0].CreatedAt)
+	}
+}
+
+func TestCapRevisionsLockedCapsAtMaxRevisionsPerKey(t *testing.T) {
+	store := NewStore(trust.ExplicitPublishers{})
+	var revisions []record
+	for i := 0; i < maxRevisionsPerKey+5; i++ {
+		revisions = upsertRevision(revisions, record{
+			Declaration: protocol.AppDeclaration{Commit: strings.Repeat(string(rune('a'+i)), 4)},
+			CreatedAt:   nostr.Timestamp(i),
+		})
+	}
+	capped := store.capRevisionsLocked(revisions)
+	if len(capped) != maxRevisionsPerKey {
+		t.Fatalf("expected the revision list capped at %d, got %d", maxRevisionsPerKey, len(capped))
+	}
+	if capped[0].CreatedAt != nostr.Timestamp(maxRevisionsPerKey+4) {
+		t.Fatalf("expected the cap to retain the newest revisions, got newest CreatedAt=%d", capped[0].CreatedAt)
+	}
+}
+
+// TestCapRevisionsLockedNeverEvictsTheCurrentlyAcceptedRevision guards
+// against reopening Phase 11's bug through a different door: enough
+// unattested republishes (beyond maxRevisionsPerKey) must not silently
+// evict an already-attested revision the store is actively relying on as
+// WriteSnapshot's fallback.
+func TestCapRevisionsLockedNeverEvictsTheCurrentlyAcceptedRevision(t *testing.T) {
+	store := NewStore(trust.ExplicitPublishers{})
+	store.SetAttestationPolicy(trust.AttestationPolicy{Mode: trust.AttestationRequire})
+	oldAcceptedCommit := strings.Repeat("f", 40)
+	if err := store.IngestAttestation(signedAttestation(t, strings.Repeat("1", 64), "hello_nostr", "https://github.com/example/app_ynh", oldAcceptedCommit, testDeclarationManifest, testDeclarationContent)); err != nil {
+		t.Fatal(err)
+	}
+
+	var revisions []record
+	// The accepted revision arrives first (so it would naturally be pushed
+	// past the cutoff by everything newer that follows).
+	revisions = upsertRevision(revisions, record{
+		Declaration: protocol.AppDeclaration{
+			Commit: oldAcceptedCommit, Repository: "https://github.com/example/app_ynh",
+			ManifestHash: testDeclarationManifest, ContentHash: testDeclarationContent,
+		},
+		CreatedAt: 0,
+		Manifest:  map[string]any{"id": "hello_nostr"},
+	})
+	for i := 0; i < maxRevisionsPerKey+5; i++ {
+		revisions = upsertRevision(revisions, record{
+			Declaration: protocol.AppDeclaration{Commit: strings.Repeat(string(rune('a'+i)), 4)},
+			CreatedAt:   nostr.Timestamp(i + 1),
+			Manifest:    map[string]any{"id": "hello_nostr"},
+		})
+	}
+
+	capped := store.capRevisionsLocked(revisions)
+	if len(capped) != maxRevisionsPerKey+1 {
+		t.Fatalf("expected the protected revision to add exactly one extra slot, got %d revisions", len(capped))
+	}
+	found := false
+	for _, r := range capped {
+		if r.Declaration.Commit == oldAcceptedCommit {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the currently-accepted revision must never be evicted by the cap: %+v", capped)
+	}
+}
+
+// TestWriteSnapshotSurvivesManyUnattestedRepublishes is
+// TestCapRevisionsLockedNeverEvictsTheCurrentlyAcceptedRevision's real-path
+// counterpart: the same guarantee, exercised through Ingest/WriteSnapshot
+// rather than by constructing revisions directly, with several times the
+// cap's worth of churn.
+func TestWriteSnapshotSurvivesManyUnattestedRepublishes(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	verifierKey := strings.Repeat("9", 64)
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	store.SetAttestationPolicy(trust.AttestationPolicy{Mode: trust.AttestationRequire})
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	v1 := signedEventWith(t, publisherKey, "hello_nostr", "https://github.com/example/app_ynh", "1.0.0~ynh1", 1)
+	if err := store.IngestVerified(context.Background(), v1, verify); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IngestAttestation(signedAttestation(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent)); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < maxRevisionsPerKey*3; i++ {
+		commit := fmt.Sprintf("%040x", i+1000)
+		event := nostr.Event{
+			PubKey: publisher, CreatedAt: nostr.Timestamp(i + 2), Kind: 30078,
+			Tags: nostr.Tags{
+				{"d", "hello_nostr"}, {"platform", "yunohost"},
+				{"repo", "https://github.com/example/app_ynh"}, {"version", "2.0.0~ynh1"},
+				{"commit", commit},
+				{"manifest", "sha256:" + fmt.Sprintf("%064x", 2)}, {"content", "sha256:" + fmt.Sprintf("%064x", 3)},
+			},
+			Content: "{}",
+		}
+		if err := event.Sign(publisherKey); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	catalogue := writeSnapshotCatalog(t, store)
+	app, ok := catalogue.Apps["hello_nostr"]
+	if !ok {
+		t.Fatalf("attested v1 must survive %d unattested republishes, not just fit within maxRevisionsPerKey=%d", maxRevisionsPerKey*3, maxRevisionsPerKey)
+	}
+	if app.Git.Revision != testDeclarationCommit {
+		t.Fatalf("expected the catalogue to still be pinned to v1's commit, got %q", app.Git.Revision)
 	}
 }
 

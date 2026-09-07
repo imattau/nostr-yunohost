@@ -213,14 +213,24 @@ catalogue advances to v2.
 ```
 
 `Store` keeps every recently seen distinct-commit revision per
-publisher/app pair (`upsertRevision`, capped at 10 revisions), not just the
-latest. `WriteSnapshot` picks the *newest revision that is both
-repository-verified and accepted by the local attestation policy*
+publisher/app pair (`upsertRevision`, capped at 10 by `capRevisionsLocked`),
+not just the latest. `WriteSnapshot` picks the *newest revision that is
+both repository-verified and accepted by the local attestation policy*
 (`selectAcceptedRevisionLocked`), falling back through older revisions
 rather than to nothing when the newest one isn't (yet) accepted. Under
 `off`/`prefer` (which always accept), this reduces to "pick the newest
 verified revision" - unchanged from before this existed. Only `require`
 actually exercises the fallback.
+
+The cap itself is attestation-aware, not just a blind recency window:
+`capRevisionsLocked` never evicts a revision beyond the cutoff that the
+policy currently accepts (at most one extra slot, so the list can reach 11,
+never unbounded). Without this, enough unattested republishes - more than
+10, from the same publisher, before any of them got attested - would have
+reopened this exact bug through a different door: eviction instead of
+overwrite. This can only ever protect the single most-recently-accepted
+revision, not an arbitrary older one that might become relevant if attested
+later; a revision evicted before ever being attested is gone regardless.
 
 This was a real gap until it was verified end-to-end and fixed: the
 original `require` implementation (Phases 6-10) filtered only at the
