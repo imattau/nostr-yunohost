@@ -46,6 +46,57 @@ jobs:
 The workflow checks out the calling repository, so it must run from a
 workflow defined in the `_ynh` package repository itself.
 
+## Adopting this in a new package repository
+
+Lessons from actually wiring this into `quantumrelay_ynh` (2026-09-07),
+after copying `nostr_catalog_ynh`'s `security.yml` verbatim and hitting two
+real gaps neither the workflow nor its docs mentioned at the time:
+
+1. **Drop any standalone `package_linter.yml`/lint-only workflow first.**
+   This workflow's `yunohost_lint` check runs the exact same
+   `YunoHost/package_linter` tool - keeping both just double-runs it on
+   every push for no benefit. If the old workflow had a custom
+   catalog-membership allowlist script (see next point), delete that too;
+   its logic now lives here.
+
+2. **Every known caller distributes through this custom Nostr catalog, not
+   `YunoHost/apps`**, so `package_linter`'s `AppCatalog.is_in_catalog` and
+   `AppCatalog.state_is_working` findings are permanently, expectedly true
+   - not regressions. The `yunohost_lint` step allowlists those two by
+   default (`ignore-catalog-membership-lint: true`); set it `false` only
+   for a package that is, or wants to be, in the official catalog, where
+   those findings are real signal. **This default didn't always exist** -
+   `nostr_catalog_ynh`'s own `security.yml` ran red on every single commit
+   for its first day because the workflow didn't allowlist these findings
+   yet. If a package's CI is failing on nothing but `AppCatalog.*`, that's
+   this workflow being stale in that repository's cache, not a real bug -
+   the fix already landed here, `@main` just needs a fresh run.
+
+3. **Add a `.shellcheckrc` disabling `SC2154`/`SC2034`/`SC1091` at the repo
+   root, or the `shellcheck` check will always fail.** YunoHost injects
+   `$app`/`$install_dir`/`$data_dir`/every config-panel field into
+   lifecycle scripts at runtime; nothing in the script itself ever assigns
+   them, which ShellCheck reads as "referenced but not assigned" (SC2154)
+   across essentially every line of every script. `./_common.sh` and
+   `/usr/share/yunohost/helpers` are sourced everywhere but the latter only
+   exists on a real YunoHost server, never in CI (SC1091). `_common.sh`
+   itself typically defines helpers only used after being sourced
+   elsewhere, which ShellCheck can't trace without `-x` (SC2034). None of
+   this is optional per-package config to get right from scratch - copy
+   `nostr_catalog_ynh`'s `.shellcheckrc` (or `quantumrelay_ynh`'s, identical)
+   as-is. Whatever's left after that is worth reading closely - it's real
+   (`quantumrelay_ynh` had one live unquoted-variable bug, `SC2086`,
+   underneath all the noise).
+
+4. **No package - including `nostr_catalog_ynh`, the catalog daemon's own
+   repository - has actually wired up the `nostr-ynh attest` signing step
+   yet.** This workflow only produces the unsigned `ci-result.json`.
+   Signing and publishing it as a kind-30080 event (see the `attest` job
+   example under Output below) is a separate, deliberately-not-yet-adopted
+   step requiring its own verifier keypair, distinct from any package's
+   publisher key. Adding `security.yml` alone gets a package exactly as far
+   as every other package currently is - green CI, no attestations yet.
+
 ## Checks
 
 | Check (`ci-result.json` key) | Tool | What it catches |
