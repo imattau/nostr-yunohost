@@ -99,6 +99,40 @@ without connecting to a relay - the same pattern `nostr-ynh publish
 The verifier key is a separate identity from the package publisher's key -
 nothing requires the same server to both publish and verify.
 
+## Consuming attestations in nostr-catalogd
+
+`nostr-catalogd` subscribes to attestation events unconditionally (unlike
+endorsements, which only accumulate once `--trusted-curators` is set) and
+stores every well-formed one in `catalog.Store`, keyed by (repository,
+commit) and then by verifier - `internal/catalog`'s `IngestAttestation`.
+Storage does not require a matching declaration to already exist: a
+declaration and its attestations are independent event streams, per the
+plan's "declaration + zero or more attestations" model.
+
+`Store.AttestationsFor(declaration)` returns the attestations that actually
+apply to one accepted declaration. Matching on repository and commit is not
+enough by itself - an attestation is only returned if its `manifest`/`content`
+hashes also agree with the declaration's own (already repository-verified)
+hashes. This is the "never treat an attestation for another revision as
+valid" rule from the plan, applied concretely: repository and commit could
+coincidentally (or maliciously) match while the actual code hash doesn't.
+
+Nothing yet *uses* `AttestationsFor` to change what the generated catalogue
+serves - that's local trust policy (Phase 6, not implemented) and the
+security index (Phase 8, not implemented). Phase 5 only makes attestations
+available; it does not yet gate anything on them.
+
+**Known gap, shared with endorsements:** attestations are only accumulated
+from the live subscription opened at daemon startup - there is no
+historical fetch (no `FetchAttestations` alongside `FetchAppDeclarations`)
+and no persistence across restarts, matching the endorsement subscription's
+existing behavior. A freshly restarted daemon holds zero attestations until
+new ones arrive on relays it's watching. This is fine while nothing depends
+on attestations yet, but should be fixed - a historical fetch and/or cache
+persistence, for both endorsements and attestations - before Phase 6's
+`require` policy ships, or a restart would transiently un-attest every
+package.
+
 ## Relationship to endorsements
 
 Endorsements and attestations are structurally independent event kinds and

@@ -17,6 +17,7 @@ import (
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/repository"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/verification"
 )
 
 type record struct {
@@ -136,6 +137,23 @@ func comparePackageVersions(left, right string) int {
 	return 0
 }
 
+// attestationRecord pairs a stored attestation with the full signed event it
+// came from, so byVerifier dedup can compare CreatedAt the same way entries
+// does for declarations.
+type attestationRecord struct {
+	Event       nostr.Event
+	Attestation verification.Attestation
+}
+
+// attestationKey identifies the exact revision an attestation is about -
+// the same (repository, commit) pair a declaration advertises, normalized
+// the same way selectSameSourceLatest already normalizes repository
+// identity so an attestation and a declaration for the same revision agree
+// on the key regardless of a trailing slash or ".git" suffix.
+func attestationKey(repositoryURL, commit string) string {
+	return normalizeRepository(repositoryURL) + "\x00" + commit
+}
+
 // Store keeps the latest accepted declaration for each publisher/app pair.
 type Store struct {
 	mu             sync.RWMutex
@@ -143,6 +161,12 @@ type Store struct {
 	entries        map[string]record
 	curationPolicy *curation.Policy
 	endorsements   []curation.Endorsement
+	// attestations is keyed first by attestationKey(repo, commit), then by
+	// verifier pubkey, so multiple independent verifiers can each hold their
+	// own attestation for the same revision (docs/attestation-trust-policy-plan.md
+	// Phase 12), while a later event from the same verifier for the same
+	// revision replaces its earlier one.
+	attestations map[string]map[string]attestationRecord
 }
 
 // SetCurationPolicy enables trusted-curator selection for duplicate app IDs.
@@ -228,6 +252,66 @@ func (s *Store) IngestEndorsement(event nostr.Event) error {
 	}
 	s.endorsements = append(s.endorsements, endorsement)
 	return nil
+}
+
+// IngestAttestation validates and stores a CI-backed attestation event
+// (kind 30080, internal/verification): signature, event ID, and every
+// required tag/content field are checked by verification.Parse itself.
+// Unlike declarations, an attestation is accepted independently of whether
+// any matching declaration currently exists in this store - it is a
+// well-formed, independently signed claim about a (repository, commit)
+// pair by itself, per docs/attestation-trust-policy-plan.md Phase 5's
+// "declaration + zero or more attestations" model. Whether it actually
+// matches a specific accepted declaration - including the hash checks that
+// matter most - is decided by AttestationsFor, not here.
+func (s *Store) IngestAttestation(event nostr.Event) error {
+	parsed, err := verification.Parse(event)
+	if err != nil {
+		return err
+	}
+	key := attestationKey(parsed.Repository, parsed.Commit)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.attestations == nil {
+		s.attestations = make(map[string]map[string]attestationRecord)
+	}
+	byVerifier := s.attestations[key]
+	if byVerifier == nil {
+		byVerifier = make(map[string]attestationRecord)
+		s.attestations[key] = byVerifier
+	}
+	if existing, ok := byVerifier[parsed.Verifier]; ok && existing.Event.CreatedAt >= event.CreatedAt {
+		return nil
+	}
+	byVerifier[parsed.Verifier] = attestationRecord{Event: event, Attestation: parsed}
+	return nil
+}
+
+// AttestationsFor returns every stored attestation that actually matches
+// declaration's exact revision, sorted by verifier pubkey for a stable
+// result. Matching on repository and commit alone is not enough: an
+// attestation whose manifest/content hash disagrees with the declaration's
+// own (already repository-verified, see IngestVerifiedPackage) hashes is
+// never returned, even though its repo/commit match - that is exactly what
+// "never treat an attestation for another revision as valid" rules out, and
+// the shape a forged or simply stale attestation would take.
+func (s *Store) AttestationsFor(declaration protocol.AppDeclaration) []verification.Attestation {
+	key := attestationKey(declaration.Repository, declaration.Commit)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	byVerifier := s.attestations[key]
+	if len(byVerifier) == 0 {
+		return nil
+	}
+	matched := make([]verification.Attestation, 0, len(byVerifier))
+	for _, record := range byVerifier {
+		if record.Attestation.ManifestHash != declaration.ManifestHash || record.Attestation.ContentHash != declaration.ContentHash {
+			continue
+		}
+		matched = append(matched, record.Attestation)
+	}
+	sort.Slice(matched, func(i, j int) bool { return matched[i].Verifier < matched[j].Verifier })
+	return matched
 }
 
 type cacheFile struct {

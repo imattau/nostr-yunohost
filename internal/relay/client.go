@@ -10,6 +10,7 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/verification"
 )
 
 // Client publishes and subscribes through a configured set of relays.
@@ -129,4 +130,12 @@ func (c *Client) SubscribeAppDeclarations(ctx context.Context) <-chan nostr.Rela
 // SubscribeEndorsements streams curator endorsement events from all relays.
 func (c *Client) SubscribeEndorsements(ctx context.Context) <-chan nostr.RelayEvent {
 	return c.pool.SubscribeMany(ctx, c.urls, nostr.Filter{Kinds: []int{30079}})
+}
+
+// SubscribeAttestations streams CI-backed attestation events from all
+// relays, mirroring SubscribeEndorsements's live-only semantics: like
+// endorsements, attestations are not backfilled by a historical fetch on
+// startup, only accumulated from events seen after the subscription opens.
+func (c *Client) SubscribeAttestations(ctx context.Context) <-chan nostr.RelayEvent {
+	return c.pool.SubscribeMany(ctx, c.urls, nostr.Filter{Kinds: []int{verification.AttestationKind}})
 }

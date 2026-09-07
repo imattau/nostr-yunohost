@@ -94,6 +94,20 @@ func main() {
 			}
 		}()
 	}
+	// Attestations are consumed unconditionally, unlike endorsements: a
+	// well-formed attestation is accepted into the store regardless of any
+	// trust configuration, since nothing yet decides whether attestations
+	// affect the generated catalogue (docs/attestation-trust-policy-plan.md
+	// Phase 6, not implemented). Storing them now means they are already
+	// available once that policy exists, rather than silently dropped in
+	// the meantime.
+	go func() {
+		for received := range client.SubscribeAttestations(ctx) {
+			if err := store.IngestAttestation(*received.Event); err != nil {
+				log.Printf("reject attestation %s: %v", received.ID, err)
+			}
+		}
+	}()
 
 	if *adminListen != "" && *publisherKeyFile != "" {
 		admin, err := newAdminServer(store, *publisherKeyFile, *installedAppsFile, *attestationLedgerFile, client)
