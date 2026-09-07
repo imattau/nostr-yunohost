@@ -433,7 +433,7 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 		Categories:   []any{},
 		Security: SecurityIndex{
 			Version: 1,
-			Apps:    map[string][]any{},
+			Apps:    map[string][]SecurityAppEntry{},
 			System:  map[string][]any{},
 		},
 	}
@@ -485,7 +485,8 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 		// (e.g. Declarations/Snapshot), just not offered to the YunoHost
 		// installer. Off and Prefer always accept, so this is a no-op
 		// until an administrator opts into Require.
-		if !s.attestationPolicy.Evaluate(s.attestationsForLocked(selected.Declaration)).Accepted {
+		attestations := s.attestationsForLocked(selected.Declaration)
+		if !s.attestationPolicy.Evaluate(attestations).Accepted {
 			continue
 		}
 		app, err := TranslateWithBranch(selected.Declaration, selected.Manifest, selected.LogoHash, selected.Branch, int64(selected.CreatedAt))
@@ -498,6 +499,18 @@ func (s *Store) WriteSnapshot(output interface{ Write([]byte) (int, error) }) er
 			app.HighQuality = count >= s.curationPolicy.MinimumEndorsements()
 		}
 		catalogue.Apps[appID] = app
+		// Phase 8: every attestation matching this exact revision becomes
+		// its own security-index entry - deliberately not collapsed into
+		// one summary judgment, since a failing check is exactly what an
+		// administrator (or the future admin UI, Phase 9) needs visible,
+		// not just whichever attestation happened to pass.
+		if len(attestations) > 0 {
+			entries := make([]SecurityAppEntry, 0, len(attestations))
+			for _, a := range attestations {
+				entries = append(entries, NewSecurityAppEntry(a))
+			}
+			catalogue.Security.Apps[appID] = entries
+		}
 	}
 	s.mu.RUnlock()
 	data, err := json.Marshal(catalogue)

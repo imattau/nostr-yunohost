@@ -117,11 +117,17 @@ hashes. This is the "never treat an attestation for another revision as
 valid" rule from the plan, applied concretely: repository and commit could
 coincidentally (or maliciously) match while the actual code hash doesn't.
 
-`WriteSnapshot` is the only current consumer of `AttestationsFor`, via the
-local trust policy below. The security index (Phase 8, populating
-`SecurityIndex.Apps` with per-check detail) is still not implemented -
-`require` mode today can only exclude or include an app, not explain why on
-the generated `/v3/apps.json` itself.
+`WriteSnapshot` is the only current consumer of `AttestationsFor`: the local
+trust policy below decides inclusion/exclusion, and separately, every
+matching attestation for a *retained* app becomes an entry in
+`SecurityIndex.Apps[appID]` (`catalog.NewSecurityAppEntry`) - one entry per
+verifier, carrying `revision`/`status`/`verifier` (as npub)/`tested_at`/
+`checks`, matching the plan's Phase 8 example shape. This is populated
+regardless of Mode: `off`/`prefer` apps that stay installable despite a
+failing or absent attestation still get whatever evidence exists recorded
+here (an app with zero attestations gets no entry at all, rather than an
+empty list). An app excluded entirely by `require` gets no security-index
+entry either, since it isn't in `Apps` for the index to be attached to.
 
 **Known gap, shared with endorsements, now load-bearing:** attestations are
 only accumulated from the live subscription opened at daemon startup -
@@ -152,13 +158,16 @@ documents these as an explicitly later extension, plan Phase 12).
 | `prefer` | in catalogue | in catalogue, marked verified |
 | `require` | **excluded** from catalogue | in catalogue, marked verified |
 
-"Marked verified" is only exposed today through the Go API
-(`trust.AttestationPolicy.Evaluate(...).Verified`, and
-`Store.AttestationsFor` directly) - there is no visible field on the
-generated `/v3/apps.json` yet distinguishing a verified app from an
-unverified one admitted under `off`/`prefer`. That surface is Phase 8's
-security index and Phase 9's admin UI, neither implemented yet; `require`'s
-exclusion is the only externally visible effect right now.
+"Marked verified" is now visible on the generated `/v3/apps.json` itself,
+via the security index above: a passing attestation's entry has
+`"status": "verified"`; a failing or erroring one carries its raw result
+(`"fail"`/`"error"`) instead. There is deliberately no single boolean
+collapsing this into one verdict per app - an app can have several
+attestations (Phase 12's multiple independent verifiers), and the plan
+calls for listing the evidence, not summarizing it. Phase 9's admin UI
+(not implemented) is the still-missing surface for *why* `require` excluded
+a specific app - the security index only appears for apps that made it into
+`Apps` in the first place.
 
 This flag is unrelated to the existing `--attestation-ledger`/
 `--publisher-key-file` flags: those configure this server's own kind-30079

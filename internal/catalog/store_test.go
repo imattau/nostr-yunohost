@@ -3,11 +3,13 @@ package catalog
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/curation"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/trust"
@@ -459,6 +461,145 @@ func TestWriteSnapshotOffPolicyIncludesUnattestedApp(t *testing.T) {
 	}
 	if !bytes.Contains(output.Bytes(), []byte(`"apps":{"hello_nostr"`)) {
 		t.Fatalf("default (off) policy must not exclude an unattested app: %s", output.String())
+	}
+}
+
+func writeSnapshotCatalog(t *testing.T, store *Store) YunoHostCatalog {
+	t.Helper()
+	var output bytes.Buffer
+	if err := store.WriteSnapshot(&output); err != nil {
+		t.Fatal(err)
+	}
+	var catalogue YunoHostCatalog
+	if err := json.Unmarshal(output.Bytes(), &catalogue); err != nil {
+		t.Fatalf("decode snapshot: %v (raw=%s)", err, output.String())
+	}
+	return catalogue
+}
+
+func TestWriteSnapshotPopulatesSecurityIndex(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	verifierKey := strings.Repeat("9", 64)
+	event := signedEvent(t, publisherKey, "hello_nostr")
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	verifier, _ := nostr.GetPublicKey(verifierKey)
+	wantVerifierNpub, err := nip19.EncodePublicKey(verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+	passing := signedAttestation(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent)
+	if err := store.IngestAttestation(passing); err != nil {
+		t.Fatal(err)
+	}
+
+	catalogue := writeSnapshotCatalog(t, store)
+	entries := catalogue.Security.Apps["hello_nostr"]
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one security entry, got: %+v", entries)
+	}
+	entry := entries[0]
+	if entry.Revision != testDeclarationCommit || entry.Status != "verified" || entry.Verifier != wantVerifierNpub {
+		t.Fatalf("unexpected security entry: %+v", entry)
+	}
+	if entry.Checks["yunohost_lint"] != "pass" {
+		t.Fatalf("expected checks to be carried through: %+v", entry.Checks)
+	}
+}
+
+func TestWriteSnapshotSecurityIndexIncludesFailingAttestation(t *testing.T) {
+	// Off policy: the app stays installable despite a failing attestation,
+	// but the security index must still surface the failure rather than
+	// silently omitting evidence that doesn't happen to be good news.
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	verifierKey := strings.Repeat("a1", 32)
+	event := signedEvent(t, publisherKey, "hello_nostr")
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+	failing := signedAttestationAt(t, verifierKey, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent, "fail", 1)
+	if err := store.IngestAttestation(failing); err != nil {
+		t.Fatal(err)
+	}
+
+	catalogue := writeSnapshotCatalog(t, store)
+	if _, ok := catalogue.Apps["hello_nostr"]; !ok {
+		t.Fatal("off policy must still include the app despite the failing attestation")
+	}
+	entries := catalogue.Security.Apps["hello_nostr"]
+	if len(entries) != 1 || entries[0].Status != "fail" {
+		t.Fatalf("expected the failing attestation to appear in the security index as status fail, got: %+v", entries)
+	}
+}
+
+func TestWriteSnapshotSecurityIndexListsMultipleVerifiers(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	firstVerifier := strings.Repeat("b1", 32)
+	secondVerifier := strings.Repeat("c1", 32)
+	event := signedEvent(t, publisherKey, "hello_nostr")
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IngestAttestation(signedAttestation(t, firstVerifier, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IngestAttestation(signedAttestation(t, secondVerifier, "hello_nostr", "https://github.com/example/app_ynh", testDeclarationCommit, testDeclarationManifest, testDeclarationContent)); err != nil {
+		t.Fatal(err)
+	}
+
+	catalogue := writeSnapshotCatalog(t, store)
+	if entries := catalogue.Security.Apps["hello_nostr"]; len(entries) != 2 {
+		t.Fatalf("expected one security entry per independent verifier, got: %+v", entries)
+	}
+}
+
+func TestWriteSnapshotSecurityIndexOmitsUnattestedApp(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	event := signedEvent(t, publisherKey, "hello_nostr")
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	if err := store.IngestVerified(context.Background(), event, verify); err != nil {
+		t.Fatal(err)
+	}
+
+	catalogue := writeSnapshotCatalog(t, store)
+	if _, ok := catalogue.Security.Apps["hello_nostr"]; ok {
+		t.Fatalf("expected no security index entry for an app with zero attestations, got: %+v", catalogue.Security.Apps["hello_nostr"])
 	}
 }
 

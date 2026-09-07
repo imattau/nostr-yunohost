@@ -3,7 +3,9 @@ package catalog
 import (
 	"fmt"
 
+	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/nostr-yunohost/nostr-yunohost/internal/protocol"
+	"github.com/nostr-yunohost/nostr-yunohost/internal/verification"
 )
 
 // YunoHostCatalog is the top-level shape used by the v3 application catalog.
@@ -14,12 +16,30 @@ type YunoHostCatalog struct {
 	Security     SecurityIndex          `json:"security"`
 }
 
-// SecurityIndex is the versioned empty security index accepted by YunoHost.
-// Future Nostr security attestations can populate Apps and System.
+// SecurityIndex is the versioned security index accepted by YunoHost.
+// System is left empty - nothing in this catalogue currently attests to
+// system-level (as opposed to per-app) properties. Apps is populated from
+// CI-backed attestations (docs/attestation-trust-policy-plan.md Phase 8);
+// YunoHost itself is free to ignore this extra metadata, but the daemon's
+// own admin UI (Phase 9, not implemented) will read it directly.
 type SecurityIndex struct {
-	Version int              `json:"version"`
-	Apps    map[string][]any `json:"apps"`
-	System  map[string][]any `json:"system"`
+	Version int                           `json:"version"`
+	Apps    map[string][]SecurityAppEntry `json:"apps"`
+	System  map[string][]any              `json:"system"`
+}
+
+// SecurityAppEntry is one CI attestation record for a specific app revision,
+// derived from a single kind-30080 attestation event
+// (internal/verification.Attestation). An app can have several - one per
+// verifier - for the same Revision, which is exactly the plan's Phase 12
+// "multiple independent verifiers" design: this index doesn't collapse them
+// into one summary judgment, it lists the evidence.
+type SecurityAppEntry struct {
+	Revision string            `json:"revision"`
+	Status   string            `json:"status"`
+	Verifier string            `json:"verifier"`
+	TestedAt int64             `json:"tested_at"`
+	Checks   map[string]string `json:"checks"`
 }
 
 type YunoHostApp struct {
@@ -39,6 +59,40 @@ type YunoHostApp struct {
 	PotentialAlternativeTo []string       `json:"potential_alternative_to"`
 	State                  string         `json:"state"`
 	Subtags                []string       `json:"subtags"`
+}
+
+// NewSecurityAppEntry converts one CI attestation into its security-index
+// record. Verifier is encoded as npub for the same reason the config panel
+// shows publisher identity as npub - it's the form administrators actually
+// compare against a trusted-verifiers list, not the raw hex key. Encoding
+// only fails for a malformed key, which verification.Parse already
+// rejects before an Attestation can exist, so this falls back to the raw
+// hex rather than dropping the entry entirely.
+func NewSecurityAppEntry(a verification.Attestation) SecurityAppEntry {
+	verifier := a.Verifier
+	if npub, err := nip19.EncodePublicKey(a.Verifier); err == nil {
+		verifier = npub
+	}
+	return SecurityAppEntry{
+		Revision: a.Commit,
+		Status:   securityStatus(a.Result),
+		Verifier: verifier,
+		TestedAt: a.TestedAt,
+		Checks:   a.Checks,
+	}
+}
+
+// securityStatus maps an attestation's overall result to the security
+// index's status vocabulary. Phase 10's richer status vocabulary
+// (unverified/integrity_verified/ci_verified/multi_verified/failed) is a
+// later phase, not implemented here; "verified" for a passing attestation
+// matches the plan's own Phase 8 example, and fail/error pass through
+// unchanged since no better word for them exists yet.
+func securityStatus(result string) string {
+	if result == "pass" {
+		return "verified"
+	}
+	return result
 }
 
 type GitSource struct {

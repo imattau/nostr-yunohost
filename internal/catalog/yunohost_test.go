@@ -8,7 +8,7 @@ import (
 )
 
 func TestYunoHostCatalogHasVersionedSecurityIndex(t *testing.T) {
-	catalogue := YunoHostCatalog{Security: SecurityIndex{Version: 1, Apps: map[string][]any{}, System: map[string][]any{}}}
+	catalogue := YunoHostCatalog{Security: SecurityIndex{Version: 1, Apps: map[string][]SecurityAppEntry{}, System: map[string][]any{}}}
 	data, err := json.Marshal(catalogue)
 	if err != nil {
 		t.Fatal(err)
