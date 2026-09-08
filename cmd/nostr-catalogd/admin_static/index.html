@@ -2,77 +2,265 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Nostr Catalogue — Attestations</title>
+<title>Nostr Catalogue</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
-  h1 { font-size: 1.25rem; }
-  table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-  th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #ddd; }
-  button { margin-right: 0.25rem; }
-  .status { font-size: 0.9rem; color: #555; margin-top: 1rem; white-space: pre-wrap; }
-  .attested { color: #2a7; font-weight: 600; }
-  .note { display: block; font-size: 0.8rem; color: #777; }
-  .expand { background: none; border: none; cursor: pointer; font-size: 0.9rem; padding: 0 0.25rem; }
+  /* Token set mirrors shadcn/ui's "classic" theme (as used by Alby Hub's
+     frontend, github.com/getAlby/hub) - oklch colors, a 0.625rem base
+     radius scaled up/down per element, flat bordered cards with no shadow,
+     and a light/dark pair switched by prefers-color-scheme since this page
+     has no theme-toggle state to persist anywhere. */
+  :root {
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.145 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.145 0 0);
+    --primary: oklch(0.205 0 0);
+    --primary-foreground: oklch(0.985 0 0);
+    --secondary: oklch(0.97 0 0);
+    --secondary-foreground: oklch(0.205 0 0);
+    --muted: oklch(0.97 0 0);
+    --muted-foreground: oklch(0.556 0 0);
+    --accent: oklch(0.97 0 0);
+    --accent-foreground: oklch(0.205 0 0);
+    --destructive: oklch(0.577 0.245 27.325);
+    --destructive-foreground: oklch(0.985 0 0);
+    --border: oklch(0.922 0 0);
+    --input: oklch(0.922 0 0);
+    --ring: oklch(0.205 0 0);
+    --sidebar: oklch(0.985 0 0);
+    --sidebar-foreground: oklch(0.145 0 0);
+    --sidebar-accent: oklch(0.97 0 0);
+    --sidebar-accent-foreground: oklch(0.205 0 0);
+    --sidebar-border: oklch(0.922 0 0);
+    --positive: oklch(0.977 0.019 155.487);
+    --positive-foreground: oklch(0.623 0.169 149.178);
+    --warning: oklch(0.976 0.016 73.092);
+    --warning-foreground: oklch(0.645 0.192 41.712);
+    --radius: 0.625rem;
+    --radius-sm: calc(var(--radius) - 4px);
+    --radius-md: calc(var(--radius) - 2px);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) + 4px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: oklch(0.145 0 0);
+      --foreground: oklch(0.985 0 0);
+      --card: oklch(0.205 0 0);
+      --card-foreground: oklch(0.985 0 0);
+      --primary: oklch(0.922 0 0);
+      --primary-foreground: oklch(0.205 0 0);
+      --secondary: oklch(0.269 0 0);
+      --secondary-foreground: oklch(0.985 0 0);
+      --muted: oklch(0.269 0 0);
+      --muted-foreground: oklch(0.708 0 0);
+      --accent: oklch(0.371 0 0);
+      --accent-foreground: oklch(0.985 0 0);
+      --destructive: oklch(0.704 0.191 22.216);
+      --destructive-foreground: oklch(0.145 0 0);
+      --border: oklch(1 0 0 / 10%);
+      --input: oklch(1 0 0 / 15%);
+      --ring: oklch(0.922 0 0);
+      --sidebar: oklch(0.205 0 0);
+      --sidebar-foreground: oklch(0.985 0 0);
+      --sidebar-accent: oklch(0.269 0 0);
+      --sidebar-accent-foreground: oklch(0.985 0 0);
+      --sidebar-border: oklch(1 0 0 / 10%);
+      --positive: oklch(0.337 0.062 151.532);
+      --positive-foreground: oklch(0.859 0.14 152.167);
+      --warning: oklch(0.318 0.035 71.647);
+      --warning-foreground: oklch(0.848 0.117 72.544);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--background);
+    color: var(--foreground);
+    -webkit-font-smoothing: antialiased;
+  }
+  .layout { display: flex; min-height: 100vh; }
+  .sidebar {
+    width: 15rem;
+    flex-shrink: 0;
+    background: var(--sidebar);
+    color: var(--sidebar-foreground);
+    border-right: 1px solid var(--sidebar-border);
+    display: flex;
+    flex-direction: column;
+    padding: 1rem 0.75rem;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+  }
+  .sidebar-header { display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0.5rem 1.25rem; }
+  .logo-mark { width: 1.75rem; height: 1.75rem; border-radius: var(--radius-md); background: var(--primary); color: var(--primary-foreground); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .logo-mark svg { width: 1rem; height: 1rem; }
+  .logo-text { font-weight: 600; font-size: 0.95rem; line-height: 1.1; }
+  .logo-sub { display: block; font-size: 0.7rem; color: var(--muted-foreground); font-weight: 400; }
+  .sidebar-nav { display: flex; flex-direction: column; gap: 0.125rem; }
+  .nav-item {
+    display: flex; align-items: center; gap: 0.6rem;
+    width: 100%; text-align: left; background: none; border: none;
+    color: var(--sidebar-foreground); font: inherit; font-size: 0.85rem; font-weight: 500;
+    padding: 0.5rem 0.6rem; border-radius: var(--radius-md); cursor: pointer;
+  }
+  .nav-item svg { width: 1rem; height: 1rem; flex-shrink: 0; color: var(--muted-foreground); }
+  .nav-item:hover { background: var(--sidebar-accent); }
+  .nav-item.active { background: var(--sidebar-accent); color: var(--sidebar-accent-foreground); }
+  .nav-item.active svg { color: var(--sidebar-accent-foreground); }
+  .sidebar-footer { margin-top: auto; padding: 0.75rem 0.6rem 0.25rem; font-size: 0.7rem; color: var(--muted-foreground); border-top: 1px solid var(--sidebar-border); }
+  .content { flex: 1; min-width: 0; padding: 2rem 2.5rem; max-width: 56rem; }
+  .page-header { margin-bottom: 1.25rem; }
+  .page-header h1 { font-size: 1.15rem; font-weight: 600; margin: 0 0 0.35rem; }
+  .page-desc { font-size: 0.85rem; color: var(--muted-foreground); margin: 0; max-width: 42rem; line-height: 1.5; }
+  .card { background: var(--card); color: var(--card-foreground); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 1.25rem 1.5rem; margin-top: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+  th { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted-foreground); font-weight: 600; }
+  tbody tr:last-child td { border-bottom: none; }
+  button {
+    font: inherit; font-size: 0.82rem; font-weight: 500; cursor: pointer;
+    background: var(--primary); color: var(--primary-foreground);
+    border: 1px solid transparent; border-radius: var(--radius-md);
+    padding: 0.4rem 0.85rem; margin-right: 0.35rem;
+  }
+  button:hover { opacity: 0.88; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .status { font-size: 0.82rem; color: var(--muted-foreground); margin-top: 0.9rem; white-space: pre-wrap; }
+  .attested { color: var(--positive-foreground); font-weight: 600; }
+  .note { display: block; font-size: 0.78rem; color: var(--muted-foreground); }
+  .expand {
+    background: none; color: var(--muted-foreground); border: none;
+    font-size: 0.9rem; padding: 0 0.25rem; margin: 0;
+  }
   .expand:disabled { visibility: hidden; }
-  .history-row td { background: #fafafa; padding: 0.5rem 1rem; }
+  .history-row td { background: var(--muted); padding: 0.5rem 1rem; }
   .history-row table { margin-top: 0; }
-  .history-row th, .history-row td { padding: 0.25rem 0.5rem; border-bottom: 1px solid #eee; }
-  .trust-card { border: 1px solid #ddd; border-radius: 6px; padding: 0.75rem 1rem; margin-top: 0.75rem; }
+  .history-row th, .history-row td { padding: 0.25rem 0.5rem; }
+  .trust-card { border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 0.9rem 1.1rem; margin-top: 0.75rem; }
+  .trust-card:first-child { margin-top: 0; }
   .trust-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
-  .trust-head h3 { margin: 0; font-size: 1rem; }
-  .trust-meta { font-size: 0.8rem; color: #777; }
-  .badge { display: inline-block; font-size: 0.75rem; font-weight: 600; padding: 0.1rem 0.5rem; border-radius: 999px; }
-  .badge-verified { background: #e6f7ee; color: #187a45; }
-  .badge-unverified { background: #fbeaea; color: #a3231f; }
-  .badge-informational { background: #eee; color: #555; }
-  .attestation-block { margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #eee; }
+  .trust-head h3 { margin: 0; font-size: 0.95rem; font-weight: 600; }
+  .trust-meta { font-size: 0.78rem; color: var(--muted-foreground); }
+  .badge {
+    display: inline-block; font-size: 0.7rem; font-weight: 600;
+    padding: 0.15rem 0.55rem; border-radius: 999px; letter-spacing: 0.02em;
+  }
+  .badge-verified { background: var(--positive); color: var(--positive-foreground); }
+  .badge-unverified { background: var(--destructive); color: var(--destructive-foreground); }
+  .badge-informational { background: var(--muted); color: var(--muted-foreground); }
+  .attestation-block { margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px solid var(--border); }
   .attestation-block:first-of-type { border-top: none; }
-  .checks { list-style: none; padding: 0; margin: 0.25rem 0 0; font-size: 0.85rem; }
+  .checks { list-style: none; padding: 0; margin: 0.25rem 0 0; font-size: 0.82rem; }
   .checks li { padding: 0.1rem 0; }
-  .check-pass::before { content: "✓ "; color: #187a45; }
-  .check-fail::before { content: "✗ "; color: #a3231f; }
-  .check-other::before { content: "· "; color: #777; }
-  .exclusion { margin-top: 0.5rem; font-size: 0.85rem; color: #a3231f; }
-  .reverify-btn { font-size: 0.8rem; }
-  .reverify-result { margin-top: 0.5rem; font-size: 0.85rem; }
-  .reverify-match { color: #187a45; font-weight: 600; }
-  .reverify-mismatch { color: #a3231f; font-weight: 600; }
+  .check-pass::before { content: "✓ "; color: var(--positive-foreground); }
+  .check-fail::before { content: "✗ "; color: var(--destructive); }
+  .check-other::before { content: "· "; color: var(--muted-foreground); }
+  .exclusion { margin-top: 0.6rem; font-size: 0.82rem; color: var(--destructive); }
+  .reverify-btn, .announce-btn, .expand {
+    background: var(--secondary); color: var(--secondary-foreground);
+    border: 1px solid var(--border); font-size: 0.78rem; padding: 0.3rem 0.65rem;
+  }
+  .expand { border: none; background: none; padding: 0 0.25rem; }
+  .reverify-result { margin-top: 0.6rem; font-size: 0.82rem; }
+  .reverify-match { color: var(--positive-foreground); font-weight: 600; }
+  .reverify-mismatch { color: var(--destructive); font-weight: 600; }
   .reverify-mismatch-list { margin: 0.25rem 0 0; padding-left: 1.25rem; }
-  .profile-form { display: grid; gap: 0.5rem; max-width: 28rem; margin-top: 0.75rem; }
-  .profile-form label { display: flex; flex-direction: column; font-size: 0.85rem; color: #555; gap: 0.2rem; }
-  .profile-form input { font: inherit; padding: 0.35rem 0.5rem; border: 1px solid #ccc; border-radius: 4px; }
-  .profile-form button { align-self: start; margin-top: 0.25rem; }
-  .announce-btn { font-size: 0.8rem; }
-  .announced-note { color: #2a7; font-weight: 600; }
+  .profile-form { display: grid; gap: 0.9rem; max-width: 28rem; }
+  .profile-form label { display: flex; flex-direction: column; font-size: 0.8rem; color: var(--muted-foreground); gap: 0.3rem; font-weight: 500; }
+  .profile-form input {
+    font: inherit; font-size: 0.85rem; color: var(--foreground); background: var(--background);
+    padding: 0.45rem 0.6rem; border: 1px solid var(--input); border-radius: var(--radius-md);
+  }
+  .profile-form input:focus { outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring), transparent 75%); }
+  .profile-form button { justify-self: start; margin-top: 0.25rem; }
+  .announced-note { color: var(--positive-foreground); font-weight: 600; font-size: 0.85rem; }
+  .page { max-width: 42rem; }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
-<h1>Trust dashboard</h1>
-<p>Every declared app this server has accepted, what it has independently verified about the repository, what CI-backed attestations exist for its exact revision, and what the local attestation policy decided as a result - so a package the policy excludes is explained here, not silently hidden.</p>
-<div id="trust"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <span class="logo-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V6z"/></svg>
+      </span>
+      <span class="logo-text">Nostr Catalogue<span class="logo-sub">Admin</span></span>
+    </div>
+    <nav class="sidebar-nav">
+      <button class="nav-item active" type="button" data-page="trust">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V6z"/></svg>
+        Trust dashboard
+      </button>
+      <button class="nav-item" type="button" data-page="candidates">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M2 20c0-3.5 3-6 7-6s7 2.5 7 6"/><path d="M16 4.5c1.7.4 3 2 3 3.8 0 1.9-1.3 3.4-3 3.8"/><path d="M22 20c0-2.8-1.9-5-4.5-5.7"/></svg>
+        Attest to apps
+      </button>
+      <button class="nav-item" type="button" data-page="profile">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg>
+        Publisher profile
+      </button>
+      <button class="nav-item" type="button" data-page="announce">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11v2a2 2 0 0 0 2 2h1l3 5V4L6 9H5a2 2 0 0 0-2 2Z"/><path d="M14 8a4 4 0 0 1 0 8"/><path d="M17.5 5.5a8 8 0 0 1 0 13"/></svg>
+        Announcements
+      </button>
+    </nav>
+    <div class="sidebar-footer">nostr-catalogd</div>
+  </aside>
+  <main class="content">
+    <section class="page" id="page-trust" data-page="trust">
+      <div class="page-header">
+        <h1>Trust dashboard</h1>
+        <p class="page-desc">Every declared app this server has accepted, what it has independently verified about the repository, what CI-backed attestations exist for its exact revision, and what the local attestation policy decided as a result - so a package the policy excludes is explained here, not silently hidden.</p>
+      </div>
+      <div id="trust"></div>
+    </section>
 
-<h1>Apps you could attest to</h1>
-<p>These are apps installed on this server that were declared by a <em>different</em> publisher's catalogue entry. Attesting signs a small, publicly visible statement with this server's own catalogue identity.</p>
-<table id="candidates"><thead><tr><th></th><th>App</th><th>Publisher</th><th>Version</th><th>Action</th></tr></thead><tbody></tbody></table>
-<div class="status" id="status"></div>
+    <section class="page" id="page-candidates" data-page="candidates" hidden>
+      <div class="page-header">
+        <h1>Apps you could attest to</h1>
+        <p class="page-desc">These are apps installed on this server that were declared by a <em>different</em> publisher's catalogue entry. Attesting signs a small, publicly visible statement with this server's own catalogue identity.</p>
+      </div>
+      <div class="card">
+        <table id="candidates"><thead><tr><th></th><th>App</th><th>Publisher</th><th>Version</th><th>Action</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="status" id="status"></div>
+    </section>
 
-<h1>Publisher profile</h1>
-<p>A kind-0 Nostr profile for this server's own signing key, so it resolves to a name and picture in ordinary Nostr clients instead of an opaque hex string. Saving publishes it to every configured relay.</p>
-<form class="profile-form" id="profile-form">
-  <label>Name <input type="text" id="profile-name" maxlength="200"></label>
-  <label>About <input type="text" id="profile-about" maxlength="500"></label>
-  <label>Picture URL <input type="url" id="profile-picture" maxlength="500"></label>
-  <label>NIP-05 <input type="text" id="profile-nip05" placeholder="publisher@example.org" maxlength="200"></label>
-  <label>Website <input type="url" id="profile-website" maxlength="500"></label>
-  <button type="submit">Save profile</button>
-</form>
-<div class="status" id="profile-status"></div>
+    <section class="page" id="page-profile" data-page="profile" hidden>
+      <div class="page-header">
+        <h1>Publisher profile</h1>
+        <p class="page-desc">A kind-0 Nostr profile for this server's own signing key, so it resolves to a name and picture in ordinary Nostr clients instead of an opaque hex string. Saving publishes it to every configured relay.</p>
+      </div>
+      <div class="card">
+        <form class="profile-form" id="profile-form">
+          <label>Name <input type="text" id="profile-name" maxlength="200"></label>
+          <label>About <input type="text" id="profile-about" maxlength="500"></label>
+          <label>Picture URL <input type="url" id="profile-picture" maxlength="500"></label>
+          <label>NIP-05 <input type="text" id="profile-nip05" placeholder="publisher@example.org" maxlength="200"></label>
+          <label>Website <input type="url" id="profile-website" maxlength="500"></label>
+          <button type="submit">Save profile</button>
+        </form>
+      </div>
+      <div class="status" id="profile-status"></div>
+    </section>
 
-<h1>Announcements</h1>
-<p>Kind-1 notes announcing this server's own releases, so updates show up in an ordinary Nostr feed instead of only as an unrendered replaceable event. A revision is only ever announced once.</p>
-<div id="announce-candidates"></div>
-<table id="announcement-history"><thead><tr><th>App</th><th>Version</th><th>Commit</th><th>Announced</th></tr></thead><tbody></tbody></table>
-<div class="status" id="announce-status"></div>
+    <section class="page" id="page-announce" data-page="announce" hidden>
+      <div class="page-header">
+        <h1>Announcements</h1>
+        <p class="page-desc">Kind-1 notes announcing this server's own releases, so updates show up in an ordinary Nostr feed instead of only as an unrendered replaceable event. A revision is only ever announced once.</p>
+      </div>
+      <div id="announce-candidates"></div>
+      <div class="card">
+        <table id="announcement-history"><thead><tr><th>App</th><th>Version</th><th>Commit</th><th>Announced</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="status" id="announce-status"></div>
+    </section>
+  </main>
+</div>
 <script>
 let csrfToken = null;
 let history = [];
@@ -482,6 +670,17 @@ async function loadAnnounceSection() {
     }
     tbody.appendChild(row);
   }
+}
+
+for (const item of document.querySelectorAll(".nav-item")) {
+  item.addEventListener("click", () => {
+    for (const other of document.querySelectorAll(".nav-item")) {
+      other.classList.toggle("active", other === item);
+    }
+    for (const page of document.querySelectorAll(".page")) {
+      page.hidden = page.dataset.page !== item.dataset.page;
+    }
+  });
 }
 
 loadTrust();
