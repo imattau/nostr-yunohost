@@ -145,6 +145,57 @@ func TestBuildAnnouncementRejectsWrongKey(t *testing.T) {
 	}
 }
 
+func TestBuildAnnouncementForDeclaration(t *testing.T) {
+	declaration := protocol.AppDeclaration{
+		AppID:      "hello_nostr",
+		Publisher:  mustPublicKey(t, testPrivateKey),
+		Repository: "https://github.com/example/hello_nostr_ynh",
+		Version:    "1.0.0~ynh1",
+		Commit:     "cccccccccccccccccccccccccccccccccccccccc",
+		Name:       "Hello Nostr",
+	}
+	event, err := BuildAnnouncementForDeclaration(declaration, []string{"wss://relay.example"}, testPrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != protocol.NoteKind {
+		t.Fatalf("Kind = %d, want %d", event.Kind, protocol.NoteKind)
+	}
+	if err := protocol.VerifySignature(event); err != nil {
+		t.Fatalf("VerifySignature() error = %v", err)
+	}
+	wantAddress := "30078:" + declaration.Publisher + ":hello_nostr"
+	if tag := event.Tags.GetFirst([]string{"a", wantAddress}); tag == nil {
+		t.Fatalf("announcement missing %q a-tag, got tags %v", wantAddress, event.Tags)
+	}
+	if !strings.Contains(event.Content, "Hello Nostr") || !strings.Contains(event.Content, "1.0.0~ynh1") {
+		t.Fatalf("announcement content missing name/version: %q", event.Content)
+	}
+}
+
+func TestBuildAnnouncementForDeclarationRejectsWrongKey(t *testing.T) {
+	declaration := protocol.AppDeclaration{
+		AppID:      "hello_nostr",
+		Publisher:  mustPublicKey(t, testPrivateKey),
+		Repository: "https://github.com/example/hello_nostr_ynh",
+		Version:    "1.0.0~ynh1",
+		Commit:     "cccccccccccccccccccccccccccccccccccccccc",
+	}
+	otherKey := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if _, err := BuildAnnouncementForDeclaration(declaration, nil, otherKey); err == nil {
+		t.Fatal("BuildAnnouncementForDeclaration() accepted a declaration published by a different key")
+	}
+}
+
+func mustPublicKey(t *testing.T, privateKey string) string {
+	t.Helper()
+	publicKey, err := nostr.GetPublicKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return publicKey
+}
+
 func TestBuildAnnouncementRejectsWrongKind(t *testing.T) {
 	profile, err := BuildProfile(Profile{Name: "x"}, testPrivateKey)
 	if err != nil {

@@ -38,6 +38,12 @@
   .reverify-match { color: #187a45; font-weight: 600; }
   .reverify-mismatch { color: #a3231f; font-weight: 600; }
   .reverify-mismatch-list { margin: 0.25rem 0 0; padding-left: 1.25rem; }
+  .profile-form { display: grid; gap: 0.5rem; max-width: 28rem; margin-top: 0.75rem; }
+  .profile-form label { display: flex; flex-direction: column; font-size: 0.85rem; color: #555; gap: 0.2rem; }
+  .profile-form input { font: inherit; padding: 0.35rem 0.5rem; border: 1px solid #ccc; border-radius: 4px; }
+  .profile-form button { align-self: start; margin-top: 0.25rem; }
+  .announce-btn { font-size: 0.8rem; }
+  .announced-note { color: #2a7; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -49,6 +55,24 @@
 <p>These are apps installed on this server that were declared by a <em>different</em> publisher's catalogue entry. Attesting signs a small, publicly visible statement with this server's own catalogue identity.</p>
 <table id="candidates"><thead><tr><th></th><th>App</th><th>Publisher</th><th>Version</th><th>Action</th></tr></thead><tbody></tbody></table>
 <div class="status" id="status"></div>
+
+<h1>Publisher profile</h1>
+<p>A kind-0 Nostr profile for this server's own signing key, so it resolves to a name and picture in ordinary Nostr clients instead of an opaque hex string. Saving publishes it to every configured relay.</p>
+<form class="profile-form" id="profile-form">
+  <label>Name <input type="text" id="profile-name" maxlength="200"></label>
+  <label>About <input type="text" id="profile-about" maxlength="500"></label>
+  <label>Picture URL <input type="url" id="profile-picture" maxlength="500"></label>
+  <label>NIP-05 <input type="text" id="profile-nip05" placeholder="publisher@example.org" maxlength="200"></label>
+  <label>Website <input type="url" id="profile-website" maxlength="500"></label>
+  <button type="submit">Save profile</button>
+</form>
+<div class="status" id="profile-status"></div>
+
+<h1>Announcements</h1>
+<p>Kind-1 notes announcing this server's own releases, so updates show up in an ordinary Nostr feed instead of only as an unrendered replaceable event. A revision is only ever announced once.</p>
+<div id="announce-candidates"></div>
+<table id="announcement-history"><thead><tr><th>App</th><th>Version</th><th>Commit</th><th>Announced</th></tr></thead><tbody></tbody></table>
+<div class="status" id="announce-status"></div>
 <script>
 let csrfToken = null;
 let history = [];
@@ -340,8 +364,129 @@ async function attest(candidate, claim) {
   await loadCandidates();
 }
 
+function populateProfileForm(profile) {
+  document.getElementById("profile-name").value = profile.name || "";
+  document.getElementById("profile-about").value = profile.about || "";
+  document.getElementById("profile-picture").value = profile.picture || "";
+  document.getElementById("profile-nip05").value = profile.nip05 || "";
+  document.getElementById("profile-website").value = profile.website || "";
+}
+
+document.getElementById("profile-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const status = document.getElementById("profile-status");
+  status.textContent = "Signing and publishing...";
+  const profile = {
+    name: document.getElementById("profile-name").value,
+    about: document.getElementById("profile-about").value,
+    picture: document.getElementById("profile-picture").value,
+    nip05: document.getElementById("profile-nip05").value,
+    website: document.getElementById("profile-website").value,
+  };
+  const response = await fetch("/admin/profile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+    body: JSON.stringify(profile),
+  });
+  if (!response.ok) {
+    status.textContent = "Failed: " + (await response.text());
+    return;
+  }
+  const outcomes = await response.json();
+  status.textContent = JSON.stringify(outcomes, null, 2);
+});
+
+// buildAnnounceCandidateRow renders one of this server's own accepted
+// declarations that has not yet been announced, with a button to post the
+// kind-1 note on demand - the manual counterpart to `nostr-ynh publish
+// --announce`, sharing the same announce.Ledger dedup on the server side.
+function buildAnnounceCandidateRow(entry) {
+  const row = document.createElement("p");
+  const button = document.createElement("button");
+  button.className = "announce-btn";
+  button.textContent = `Announce ${entry.app_id} v${entry.version}`;
+  const status = document.createElement("span");
+  button.addEventListener("click", () => announceRevision(entry, button, status));
+  row.appendChild(button);
+  row.appendChild(status);
+  return row;
+}
+
+async function announceRevision(entry, button, statusEl) {
+  button.disabled = true;
+  statusEl.textContent = " publishing...";
+  try {
+    const response = await fetch("/admin/announce", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+      body: JSON.stringify({ app_id: entry.app_id, publisher: entry.publisher_hex, commit: entry.commit }),
+    });
+    if (!response.ok) {
+      statusEl.textContent = " failed: " + (await response.text());
+      button.disabled = false;
+      return;
+    }
+    await loadAnnounceSection();
+  } catch (err) {
+    statusEl.textContent = " failed: " + err;
+    button.disabled = false;
+  }
+}
+
+// loadAnnounceSection fetches its own copies of trust entries, the
+// profile (for self_publisher and the shared CSRF token), and announcement
+// history independently of loadTrust/loadCandidates above, rather than
+// sharing their in-flight state - simpler to reason about than threading
+// results between concurrent loaders for a page this size.
+async function loadAnnounceSection() {
+  const [trustResponse, profileResponse, historyResponse] = await Promise.all([
+    fetch("/admin/trust"),
+    fetch("/admin/profile"),
+    fetch("/admin/announcements"),
+  ]);
+  const trustEntries = await trustResponse.json();
+  const profileBody = await profileResponse.json();
+  csrfToken = profileBody.csrf_token;
+  const announcements = await historyResponse.json();
+
+  populateProfileForm(profileBody.profile);
+
+  const container = document.getElementById("announce-candidates");
+  container.innerHTML = "";
+  const ownEntries = trustEntries.filter((entry) => entry.publisher_hex === profileBody.self_publisher);
+  const unannounced = ownEntries.filter((entry) => !announcements.some((a) => a.app_id === entry.app_id && a.commit === entry.commit));
+  if (ownEntries.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "trust-meta";
+    empty.textContent = "No accepted declarations published by this server's own key.";
+    container.appendChild(empty);
+  } else if (unannounced.length === 0) {
+    const done = document.createElement("p");
+    done.className = "announced-note";
+    done.textContent = "Every one of this server's own declarations has already been announced.";
+    container.appendChild(done);
+  } else {
+    for (const entry of unannounced) {
+      container.appendChild(buildAnnounceCandidateRow(entry));
+    }
+  }
+
+  const tbody = document.querySelector("#announcement-history tbody");
+  tbody.innerHTML = "";
+  for (const record of announcements) {
+    const row = document.createElement("tr");
+    for (const text of [record.app_id, record.version, shortKey(record.commit), new Date(record.announced_at * 1000).toLocaleString()]) {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      row.appendChild(cell);
+    }
+    tbody.appendChild(row);
+  }
+}
+
 loadTrust();
 loadCandidates();
+loadAnnounceSection();
 </script>
 </body>
 </html>

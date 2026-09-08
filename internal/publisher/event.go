@@ -80,11 +80,11 @@ func BuildDeclaration(metadata Metadata, privateKey string) (nostr.Event, error)
 // key resolves to a real, followable account in ordinary Nostr clients
 // rather than an opaque hex string. All fields are optional.
 type Profile struct {
-	Name    string
-	About   string
-	Picture string
-	Nip05   string
-	Website string
+	Name    string `json:"name,omitempty"`
+	About   string `json:"about,omitempty"`
+	Picture string `json:"picture,omitempty"`
+	Nip05   string `json:"nip05,omitempty"`
+	Website string `json:"website,omitempty"`
 }
 
 // BuildProfile creates and signs a kind-0 profile metadata event for the
@@ -96,14 +96,7 @@ func BuildProfile(profile Profile, privateKey string) (nostr.Event, error) {
 	if err != nil {
 		return nostr.Event{}, fmt.Errorf("derive publisher public key: %w", err)
 	}
-	content := struct {
-		Name    string `json:"name,omitempty"`
-		About   string `json:"about,omitempty"`
-		Picture string `json:"picture,omitempty"`
-		Nip05   string `json:"nip05,omitempty"`
-		Website string `json:"website,omitempty"`
-	}{profile.Name, profile.About, profile.Picture, profile.Nip05, profile.Website}
-	contentBytes, err := json.Marshal(content)
+	contentBytes, err := json.Marshal(profile)
 	if err != nil {
 		return nostr.Event{}, fmt.Errorf("encode profile content: %w", err)
 	}
@@ -148,15 +141,41 @@ func BuildAnnouncement(declaration nostr.Event, repository, displayName string, 
 	if err != nil {
 		return nostr.Event{}, fmt.Errorf("encode app address: %w", err)
 	}
+	return buildAnnouncementEvent(publicKey, appID, version.Value(), commit.Value(), repository, displayName, address, privateKey)
+}
+
+// BuildAnnouncementForDeclaration is like BuildAnnouncement but takes an
+// already-validated, parsed declaration (protocol.AppDeclaration) instead of
+// the raw signed event - for a caller that only has the ingestion-time
+// parsed record, not the original event, such as nostr-catalogd's admin
+// dashboard re-announcing a declaration it already accepted. The
+// never-drift property still holds: the parsed record came from the same
+// validated event a raw-event caller would use, just already unpacked.
+func BuildAnnouncementForDeclaration(declaration protocol.AppDeclaration, relays []string, privateKey string) (nostr.Event, error) {
+	publicKey, err := nostr.GetPublicKey(privateKey)
+	if err != nil {
+		return nostr.Event{}, fmt.Errorf("derive publisher public key: %w", err)
+	}
+	if declaration.Publisher != publicKey {
+		return nostr.Event{}, fmt.Errorf("declaration was not published by this private key")
+	}
+	address, err := nip19.EncodeEntity(publicKey, protocol.AppDeclarationKind, declaration.AppID, relays)
+	if err != nil {
+		return nostr.Event{}, fmt.Errorf("encode app address: %w", err)
+	}
+	return buildAnnouncementEvent(publicKey, declaration.AppID, declaration.Version, declaration.Commit, declaration.Repository, declaration.Name, address, privateKey)
+}
+
+func buildAnnouncementEvent(publicKey, appID, version, commit, repository, displayName, address, privateKey string) (nostr.Event, error) {
 	name := displayName
 	if name == "" {
 		name = appID
 	}
-	shortCommit := commit.Value()
+	shortCommit := commit
 	if len(shortCommit) > 7 {
 		shortCommit = shortCommit[:7]
 	}
-	content := fmt.Sprintf("📦 %s %s published\n%s@%s\nnostr:%s", name, version.Value(), repository, shortCommit, address)
+	content := fmt.Sprintf("📦 %s %s published\n%s@%s\nnostr:%s", name, version, repository, shortCommit, address)
 	event := nostr.Event{
 		PubKey:    publicKey,
 		CreatedAt: nostr.Now(),
