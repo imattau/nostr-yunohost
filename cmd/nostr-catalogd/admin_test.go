@@ -12,8 +12,10 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 
+	"github.com/imattau/nostr-yunohost/internal/announce"
 	"github.com/imattau/nostr-yunohost/internal/attestation"
 	"github.com/imattau/nostr-yunohost/internal/catalog"
+	"github.com/imattau/nostr-yunohost/internal/publisher"
 	"github.com/imattau/nostr-yunohost/internal/relay"
 	"github.com/imattau/nostr-yunohost/internal/reverify"
 	"github.com/imattau/nostr-yunohost/internal/trust"
@@ -42,7 +44,7 @@ func newTestAdminServer(t *testing.T) *adminServer {
 		t.Fatalf("derive self pubkey: %v", err)
 	}
 
-	policy, err := trust.NewExplicitPublishers([]string{other})
+	policy, err := trust.NewExplicitPublishers([]string{other, self})
 	if err != nil {
 		t.Fatalf("trust.NewExplicitPublishers: %v", err)
 	}
@@ -65,6 +67,27 @@ func newTestAdminServer(t *testing.T) *adminServer {
 		t.Fatalf("Ingest: %v", err)
 	}
 
+	// A second declaration published by the admin's own key, so
+	// /admin/announce (which only ever announces this server's own
+	// declarations) has something valid to target.
+	selfEvent := nostr.Event{
+		PubKey: self, CreatedAt: 1, Kind: 30078,
+		Tags: nostr.Tags{
+			{"d", "self_app"}, {"platform", "yunohost"},
+			{"repo", "https://example.com/self_app"}, {"version", "2.0.0~ynh1"},
+			{"commit", "ffffffffffffffffffffffffffffffffffffffff"},
+			{"manifest", "sha256:1111111111111111111111111111111111111111111111111111111111111111"},
+			{"content", "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+		},
+		Content: "{}",
+	}
+	if err := selfEvent.Sign(adminTestSelfKey); err != nil {
+		t.Fatalf("sign self fixture event: %v", err)
+	}
+	if err := store.Ingest(selfEvent); err != nil {
+		t.Fatalf("Ingest self event: %v", err)
+	}
+
 	dir := t.TempDir()
 	installedAppsFile := filepath.Join(dir, "installed-apps.json")
 	installedData, err := json.Marshal(map[string]any{
@@ -85,13 +108,19 @@ func newTestAdminServer(t *testing.T) *adminServer {
 	if err != nil {
 		t.Fatalf("relay.New: %v", err)
 	}
+	announceLedger, err := announce.LoadLedger(filepath.Join(dir, "announcements.json"))
+	if err != nil {
+		t.Fatalf("announce.LoadLedger: %v", err)
+	}
 
 	return &adminServer{
-		store:         store,
-		publisher:     &attestation.Publisher{Client: client, PrivateKey: adminTestSelfKey, Ledger: ledger},
-		ledger:        ledger,
-		selfPublisher: self,
-		installedPath: installedAppsFile,
+		store:          store,
+		publisher:      &attestation.Publisher{Client: client, PrivateKey: adminTestSelfKey, Ledger: ledger},
+		ledger:         ledger,
+		selfPublisher:  self,
+		installedPath:  installedAppsFile,
+		announceLedger: announceLedger,
+		profilePath:    filepath.Join(dir, "profile.json"),
 	}
 }
 
@@ -493,19 +522,31 @@ func TestHandleTrustReturnsEntries(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&entries); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(entries) != 1 || entries[0].AppID != "hello_nostr" {
+	// newTestAdminServer ingests two fixtures: hello_nostr (a different
+	// publisher, used by the attest/candidate tests) and self_app (this
+	// server's own key, used by the /admin/announce tests).
+	if len(entries) != 2 {
 		t.Fatalf("unexpected trust entries: %+v", entries)
+	}
+	var helloEntry *catalog.TrustEntry
+	for i := range entries {
+		if entries[i].AppID == "hello_nostr" {
+			helloEntry = &entries[i]
+		}
+	}
+	if helloEntry == nil {
+		t.Fatalf("expected a hello_nostr trust entry: %+v", entries)
 	}
 	// newTestAdminServer ingests its fixture via plain Ingest, not
 	// IngestVerified, so the repository was never actually fetched/hashed.
-	if entries[0].RepositoryVerified {
-		t.Fatalf("expected RepositoryVerified=false for the Ingest-only fixture: %+v", entries[0])
+	if helloEntry.RepositoryVerified {
+		t.Fatalf("expected RepositoryVerified=false for the Ingest-only fixture: %+v", helloEntry)
 	}
-	if entries[0].Policy.Mode != "" {
-		t.Fatalf("expected the fixture's unconfigured attestation policy to report empty mode: %+v", entries[0].Policy)
+	if helloEntry.Policy.Mode != "" {
+		t.Fatalf("expected the fixture's unconfigured attestation policy to report empty mode: %+v", helloEntry.Policy)
 	}
-	if !entries[0].Policy.Accepted {
-		t.Fatalf("expected off/unconfigured policy to accept the declaration: %+v", entries[0].Policy)
+	if !helloEntry.Policy.Accepted {
+		t.Fatalf("expected off/unconfigured policy to accept the declaration: %+v", helloEntry.Policy)
 	}
 }
 
@@ -537,5 +578,241 @@ func TestHandleIndexServesEmbeddedPage(t *testing.T) {
 	}
 	if len(adminPageHTML) == 0 {
 		t.Fatal("expected the embedded admin page to be non-empty")
+	}
+}
+
+// postJSONWithCSRF fetches a fresh CSRF cookie from /admin/attestable (any
+// GET route issues the same cookie) and POSTs body to path with it attached,
+// mirroring postReverify's pattern generically for the profile/announce
+// routes below.
+func postJSONWithCSRF(t *testing.T, server *httptest.Server, path string, body []byte) *http.Response {
+	t.Helper()
+	client := &http.Client{}
+	attestable, err := client.Get(server.URL + "/admin/attestable")
+	if err != nil {
+		t.Fatalf("GET /admin/attestable: %v", err)
+	}
+	var csrfCookie *http.Cookie
+	for _, cookie := range attestable.Cookies() {
+		if cookie.Name == csrfCookieName {
+			csrfCookie = cookie
+		}
+	}
+	attestable.Body.Close()
+	if csrfCookie == nil {
+		t.Fatal("expected a CSRF cookie")
+	}
+	request, err := http.NewRequest(http.MethodPost, server.URL+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", csrfCookie.Value)
+	request.AddCookie(csrfCookie)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	return response
+}
+
+func TestHandleProfileGetReturnsEmptyProfileAndCSRFToken(t *testing.T) {
+	server := httptest.NewServer(newTestAdminServer(t).mux())
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/admin/profile")
+	if err != nil {
+		t.Fatalf("GET /admin/profile: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.StatusCode)
+	}
+	var body profileResponse
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.CSRFToken == "" {
+		t.Fatal("expected a CSRF token")
+	}
+	if body.Profile != (publisher.Profile{}) {
+		t.Fatalf("expected an empty profile before any /admin/profile POST, got %+v", body.Profile)
+	}
+}
+
+func TestHandleProfileRejectsMissingCSRF(t *testing.T) {
+	server := httptest.NewServer(newTestAdminServer(t).mux())
+	defer server.Close()
+
+	body, _ := json.Marshal(publisher.Profile{Name: "Example"})
+	response, err := http.Post(server.URL+"/admin/profile", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /admin/profile: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 without a CSRF token, got %d", response.StatusCode)
+	}
+}
+
+// TestHandleProfilePostWithUnreachableRelayDoesNotPersist exercises the
+// build-and-attempt-publish path against the fixture's unreachable relay
+// (ws://127.0.0.1:1, refused immediately - see newTestAdminServer): the
+// event is built and signed successfully, every relay publish fails, and
+// the local profile cache must therefore stay untouched rather than record
+// a profile nothing on the network actually received.
+func TestHandleProfilePostWithUnreachableRelayDoesNotPersist(t *testing.T) {
+	server := httptest.NewServer(newTestAdminServer(t).mux())
+	defer server.Close()
+
+	body, _ := json.Marshal(publisher.Profile{Name: "Example Publisher"})
+	response := postJSONWithCSRF(t, server, "/admin/profile", body)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.StatusCode)
+	}
+	var outcomes []publishOutcome
+	if err := json.NewDecoder(response.Body).Decode(&outcomes); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(outcomes) == 0 || outcomes[0].Error == "" {
+		t.Fatalf("expected a relay error against an unreachable relay, got %+v", outcomes)
+	}
+
+	getResponse, err := http.Get(server.URL + "/admin/profile")
+	if err != nil {
+		t.Fatalf("GET /admin/profile: %v", err)
+	}
+	defer getResponse.Body.Close()
+	var getBody profileResponse
+	if err := json.NewDecoder(getResponse.Body).Decode(&getBody); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if getBody.Profile != (publisher.Profile{}) {
+		t.Fatalf("expected the profile cache to remain empty after a total publish failure, got %+v", getBody.Profile)
+	}
+}
+
+func TestHandleAnnouncementsReturnsRecordedHistory(t *testing.T) {
+	testServer := newTestAdminServer(t)
+	if err := testServer.announceLedger.Record("self_app", "ffffffffffffffffffffffffffffffffffffffff", "2.0.0~ynh1", "eventid", "nevent1..."); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	server := httptest.NewServer(testServer.mux())
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/admin/announcements")
+	if err != nil {
+		t.Fatalf("GET /admin/announcements: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.StatusCode)
+	}
+	var history []announce.Record
+	if err := json.NewDecoder(response.Body).Decode(&history); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(history) != 1 || history[0].AppID != "self_app" {
+		t.Fatalf("unexpected announcement history: %+v", history)
+	}
+}
+
+func TestHandleAnnounceRejectsMissingCSRF(t *testing.T) {
+	server := httptest.NewServer(newTestAdminServer(t).mux())
+	defer server.Close()
+
+	body, _ := json.Marshal(announceRequest{AppID: "self_app", Publisher: adminTestSelfKey})
+	response, err := http.Post(server.URL+"/admin/announce", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /admin/announce: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 without a CSRF token, got %d", response.StatusCode)
+	}
+}
+
+// TestHandleAnnounceRejectsAnotherPublishersDeclaration is the structural
+// guard equivalent to attestation.Candidates excluding self-declarations:
+// here it is the opposite direction - this key must never sign an
+// announcement claiming a *different* publisher's release.
+func TestHandleAnnounceRejectsAnotherPublishersDeclaration(t *testing.T) {
+	server := httptest.NewServer(newTestAdminServer(t).mux())
+	defer server.Close()
+
+	body, _ := json.Marshal(announceRequest{AppID: "hello_nostr", Publisher: adminTestOtherPubkey(t), Commit: "cccccccccccccccccccccccccccccccccccccccc"})
+	response := postJSONWithCSRF(t, server, "/admin/announce", body)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for another publisher's declaration, got %d", response.StatusCode)
+	}
+}
+
+func TestHandleAnnounceRejectsUnknownRevision(t *testing.T) {
+	self, err := nostr.GetPublicKey(adminTestSelfKey)
+	if err != nil {
+		t.Fatalf("derive self pubkey: %v", err)
+	}
+	server := httptest.NewServer(newTestAdminServer(t).mux())
+	defer server.Close()
+
+	body, _ := json.Marshal(announceRequest{AppID: "self_app", Publisher: self, Commit: "0000000000000000000000000000000000000000"})
+	response := postJSONWithCSRF(t, server, "/admin/announce", body)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for an unknown revision, got %d", response.StatusCode)
+	}
+}
+
+func TestHandleAnnounceRejectsAlreadyAnnounced(t *testing.T) {
+	self, err := nostr.GetPublicKey(adminTestSelfKey)
+	if err != nil {
+		t.Fatalf("derive self pubkey: %v", err)
+	}
+	testServer := newTestAdminServer(t)
+	if err := testServer.announceLedger.Record("self_app", "ffffffffffffffffffffffffffffffffffffffff", "2.0.0~ynh1", "eventid", "nevent1..."); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	server := httptest.NewServer(testServer.mux())
+	defer server.Close()
+
+	body, _ := json.Marshal(announceRequest{AppID: "self_app", Publisher: self, Commit: "ffffffffffffffffffffffffffffffffffffffff"})
+	response := postJSONWithCSRF(t, server, "/admin/announce", body)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 for an already-announced revision, got %d", response.StatusCode)
+	}
+}
+
+// TestHandleAnnounceWithUnreachableRelayDoesNotRecord mirrors
+// TestHandleProfilePostWithUnreachableRelayDoesNotPersist: a total publish
+// failure against the fixture's unreachable relay must leave the
+// announcement ledger untouched, so the revision remains available for a
+// retry instead of silently reading as already-announced.
+func TestHandleAnnounceWithUnreachableRelayDoesNotRecord(t *testing.T) {
+	self, err := nostr.GetPublicKey(adminTestSelfKey)
+	if err != nil {
+		t.Fatalf("derive self pubkey: %v", err)
+	}
+	testServer := newTestAdminServer(t)
+	server := httptest.NewServer(testServer.mux())
+	defer server.Close()
+
+	body, _ := json.Marshal(announceRequest{AppID: "self_app", Publisher: self, Commit: "ffffffffffffffffffffffffffffffffffffffff"})
+	response := postJSONWithCSRF(t, server, "/admin/announce", body)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.StatusCode)
+	}
+	var outcomes []publishOutcome
+	if err := json.NewDecoder(response.Body).Decode(&outcomes); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(outcomes) == 0 || outcomes[0].Error == "" {
+		t.Fatalf("expected a relay error against an unreachable relay, got %+v", outcomes)
+	}
+	if testServer.announceLedger.HasAnnounced("self_app", "ffffffffffffffffffffffffffffffffffffffff") {
+		t.Fatal("expected the announcement ledger to remain untouched after a total publish failure")
 	}
 }

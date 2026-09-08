@@ -15,6 +15,7 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 
+	"github.com/imattau/nostr-yunohost/internal/announce"
 	"github.com/imattau/nostr-yunohost/internal/attestation"
 	"github.com/imattau/nostr-yunohost/internal/catalog"
 	"github.com/imattau/nostr-yunohost/internal/curation"
@@ -37,6 +38,8 @@ func main() {
 	publisherKeyFile := flag.String("publisher-key-file", os.Getenv("NOSTR_YNH_PUBLISHER_KEY_FILE"), "path to this server's own signing key (enables the attestation admin page)")
 	installedAppsFile := flag.String("installed-apps-file", os.Getenv("NOSTR_YNH_INSTALLED_APPS_FILE"), "path to the privileged helper's installed-app snapshot")
 	attestationLedgerFile := flag.String("attestation-ledger", os.Getenv("NOSTR_YNH_ATTESTATION_LEDGER"), "path to the local record of attestations this server has already published")
+	announcementLedgerFile := flag.String("announcement-ledger", os.Getenv("NOSTR_YNH_ANNOUNCEMENT_LEDGER"), "path to the local record of announcement notes this server has already published (admin page's profile/announce section)")
+	profileStateFile := flag.String("profile-state-file", os.Getenv("NOSTR_YNH_PROFILE_STATE_FILE"), "path to the local cache of this server's last-published profile fields (admin page's profile section)")
 	// attestationPolicyFlag is unrelated to attestation-ledger/publisher-key-file
 	// above: those configure this server's own kind-30079 curator
 	// endorsements of apps it installed (internal/attestation), while this
@@ -139,7 +142,7 @@ func main() {
 	}()
 
 	if *adminListen != "" && *publisherKeyFile != "" {
-		admin, err := newAdminServer(store, *publisherKeyFile, *installedAppsFile, *attestationLedgerFile, client)
+		admin, err := newAdminServer(store, *publisherKeyFile, *installedAppsFile, *attestationLedgerFile, *announcementLedgerFile, *profileStateFile, client)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -192,7 +195,7 @@ func main() {
 // publishes - see nostr_catalog_ynh's ensure_publisher_key), derives its
 // public key for the self-attestation guard, and opens (or creates) the
 // local attestation ledger.
-func newAdminServer(store *catalog.Store, publisherKeyFile, installedAppsFile, ledgerFile string, client *relay.Client) (*adminServer, error) {
+func newAdminServer(store *catalog.Store, publisherKeyFile, installedAppsFile, ledgerFile, announcementLedgerFile, profileStateFile string, client *relay.Client) (*adminServer, error) {
 	keyBytes, err := os.ReadFile(publisherKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("read publisher key: %w", err)
@@ -208,16 +211,28 @@ func newAdminServer(store *catalog.Store, publisherKeyFile, installedAppsFile, l
 	if ledgerFile == "" {
 		ledgerFile = "attestation-ledger.json"
 	}
+	if announcementLedgerFile == "" {
+		announcementLedgerFile = "announcement-ledger.json"
+	}
+	if profileStateFile == "" {
+		profileStateFile = "publisher-profile.json"
+	}
 	ledger, err := attestation.LoadLedger(ledgerFile)
 	if err != nil {
 		return nil, fmt.Errorf("load attestation ledger: %w", err)
 	}
+	announceLedger, err := announce.LoadLedger(announcementLedgerFile)
+	if err != nil {
+		return nil, fmt.Errorf("load announcement ledger: %w", err)
+	}
 	return &adminServer{
-		store:         store,
-		publisher:     &attestation.Publisher{Client: client, PrivateKey: privateKey, Ledger: ledger},
-		ledger:        ledger,
-		selfPublisher: selfPublisher,
-		installedPath: installedAppsFile,
+		store:          store,
+		publisher:      &attestation.Publisher{Client: client, PrivateKey: privateKey, Ledger: ledger},
+		ledger:         ledger,
+		selfPublisher:  selfPublisher,
+		installedPath:  installedAppsFile,
+		announceLedger: announceLedger,
+		profilePath:    profileStateFile,
 	}, nil
 }
 

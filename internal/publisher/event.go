@@ -75,6 +75,123 @@ func BuildDeclaration(metadata Metadata, privateKey string) (nostr.Event, error)
 	return event, nil
 }
 
+// Profile is the publisher-side input for a kind-0 profile metadata event
+// (NIP-01), published once (and re-published on change) so the publisher
+// key resolves to a real, followable account in ordinary Nostr clients
+// rather than an opaque hex string. All fields are optional.
+type Profile struct {
+	Name    string `json:"name,omitempty"`
+	About   string `json:"about,omitempty"`
+	Picture string `json:"picture,omitempty"`
+	Nip05   string `json:"nip05,omitempty"`
+	Website string `json:"website,omitempty"`
+}
+
+// BuildProfile creates and signs a kind-0 profile metadata event for the
+// publisher key. Nostr clients treat kind 0 as replaceable by (kind,
+// pubkey) alone, so publishing again with updated fields simply supersedes
+// the previous profile - no address or "d" tag is needed.
+func BuildProfile(profile Profile, privateKey string) (nostr.Event, error) {
+	publicKey, err := nostr.GetPublicKey(privateKey)
+	if err != nil {
+		return nostr.Event{}, fmt.Errorf("derive publisher public key: %w", err)
+	}
+	contentBytes, err := json.Marshal(profile)
+	if err != nil {
+		return nostr.Event{}, fmt.Errorf("encode profile content: %w", err)
+	}
+	event := nostr.Event{
+		PubKey:    publicKey,
+		CreatedAt: nostr.Now(),
+		Kind:      protocol.ProfileKind,
+		Tags:      nostr.Tags{},
+		Content:   string(contentBytes),
+	}
+	if err := event.Sign(privateKey); err != nil {
+		return nostr.Event{}, fmt.Errorf("sign profile: %w", err)
+	}
+	return event, nil
+}
+
+// BuildAnnouncement creates and signs a kind-1 text note announcing an app
+// declaration, so the update shows up in an ordinary Nostr feed instead of
+// only as a replaceable event most clients never render. It derives
+// version/commit/app ID from the already-built, already-signed declaration
+// event rather than taking them as separate parameters, so the note can
+// never drift from what was actually declared. declaration must be a signed
+// kind-30078 event built by BuildDeclaration for the same private key.
+func BuildAnnouncement(declaration nostr.Event, repository, displayName string, relays []string, privateKey string) (nostr.Event, error) {
+	if declaration.Kind != protocol.AppDeclarationKind {
+		return nostr.Event{}, fmt.Errorf("declaration is not a YunoHost app declaration")
+	}
+	publicKey, err := nostr.GetPublicKey(privateKey)
+	if err != nil {
+		return nostr.Event{}, fmt.Errorf("derive publisher public key: %w", err)
+	}
+	if declaration.PubKey != publicKey {
+		return nostr.Event{}, fmt.Errorf("declaration was not signed by this private key")
+	}
+	appID := declaration.Tags.GetD()
+	version := declaration.Tags.GetFirst([]string{"version"})
+	commit := declaration.Tags.GetFirst([]string{"commit"})
+	if appID == "" || version == nil || commit == nil {
+		return nostr.Event{}, fmt.Errorf("declaration is missing required tags")
+	}
+	address, err := AppAddress(declaration, relays)
+	if err != nil {
+		return nostr.Event{}, fmt.Errorf("encode app address: %w", err)
+	}
+	return buildAnnouncementEvent(publicKey, appID, version.Value(), commit.Value(), repository, displayName, address, privateKey)
+}
+
+// BuildAnnouncementForDeclaration is like BuildAnnouncement but takes an
+// already-validated, parsed declaration (protocol.AppDeclaration) instead of
+// the raw signed event - for a caller that only has the ingestion-time
+// parsed record, not the original event, such as nostr-catalogd's admin
+// dashboard re-announcing a declaration it already accepted. The
+// never-drift property still holds: the parsed record came from the same
+// validated event a raw-event caller would use, just already unpacked.
+func BuildAnnouncementForDeclaration(declaration protocol.AppDeclaration, relays []string, privateKey string) (nostr.Event, error) {
+	publicKey, err := nostr.GetPublicKey(privateKey)
+	if err != nil {
+		return nostr.Event{}, fmt.Errorf("derive publisher public key: %w", err)
+	}
+	if declaration.Publisher != publicKey {
+		return nostr.Event{}, fmt.Errorf("declaration was not published by this private key")
+	}
+	address, err := nip19.EncodeEntity(publicKey, protocol.AppDeclarationKind, declaration.AppID, relays)
+	if err != nil {
+		return nostr.Event{}, fmt.Errorf("encode app address: %w", err)
+	}
+	return buildAnnouncementEvent(publicKey, declaration.AppID, declaration.Version, declaration.Commit, declaration.Repository, declaration.Name, address, privateKey)
+}
+
+func buildAnnouncementEvent(publicKey, appID, version, commit, repository, displayName, address, privateKey string) (nostr.Event, error) {
+	name := displayName
+	if name == "" {
+		name = appID
+	}
+	shortCommit := commit
+	if len(shortCommit) > 7 {
+		shortCommit = shortCommit[:7]
+	}
+	content := fmt.Sprintf("📦 %s %s published\n%s@%s\nnostr:%s", name, version, repository, shortCommit, address)
+	event := nostr.Event{
+		PubKey:    publicKey,
+		CreatedAt: nostr.Now(),
+		Kind:      protocol.NoteKind,
+		Tags: nostr.Tags{
+			{"a", fmt.Sprintf("%d:%s:%s", protocol.AppDeclarationKind, publicKey, appID)},
+			{"r", repository},
+		},
+		Content: content,
+	}
+	if err := event.Sign(privateKey); err != nil {
+		return nostr.Event{}, fmt.Errorf("sign announcement: %w", err)
+	}
+	return event, nil
+}
+
 // HashBytes returns the hash format used by declaration tags.
 func HashBytes(data []byte) string {
 	digest := sha256.Sum256(data)

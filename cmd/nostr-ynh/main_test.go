@@ -240,6 +240,12 @@ type publishJSONTestResult struct {
 		Naddr     string      `json:"naddr"`
 		Published bool        `json:"published"`
 	} `json:"attestation,omitempty"`
+	Announcement *struct {
+		Skipped   bool         `json:"skipped"`
+		Event     *nostr.Event `json:"event,omitempty"`
+		Nevent    string       `json:"nevent,omitempty"`
+		Published bool         `json:"published"`
+	} `json:"announcement,omitempty"`
 }
 
 // TestRunPublishWithCIResultProducesMatchingAttestation is the actual
@@ -365,5 +371,250 @@ func TestRunPublishWithoutCIResultIsUnchanged(t *testing.T) {
 	}
 	if response.Attestation != nil {
 		t.Fatal("expected no attestation when --ci-result is omitted")
+	}
+	if response.Announcement != nil {
+		t.Fatal("expected no announcement when --announce is omitted")
+	}
+}
+
+// startAcceptingRelay starts a relay that completes the WebSocket handshake
+// and answers any EVENT it receives with an OK acceptance, so a non-dry-run
+// publish actually succeeds - the same shape internal/attestation's own test
+// helper of the same name uses, needed here because --announce's ledger is
+// only written after a real, successful relay publish.
+func startAcceptingRelay(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+			for {
+				_, data, err := conn.Read(r.Context())
+				if err != nil {
+					return
+				}
+				var message []json.RawMessage
+				if json.Unmarshal(data, &message) != nil || len(message) < 2 {
+					continue
+				}
+				var kind string
+				if json.Unmarshal(message[0], &kind) != nil || kind != "EVENT" {
+					continue
+				}
+				var event nostr.Event
+				if json.Unmarshal(message[1], &event) != nil {
+					continue
+				}
+				reply, err := json.Marshal([]any{"OK", event.ID, true, ""})
+				if err != nil {
+					return
+				}
+				if conn.Write(r.Context(), websocket.MessageText, reply) != nil {
+					return
+				}
+			}
+		}),
+	}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	return "ws://" + listener.Addr().String()
+}
+
+func TestRunPublishAnnounceRequiresLedger(t *testing.T) {
+	repo := newTestPackageRepo(t)
+	var stdout, stderr bytes.Buffer
+	code := runPublish([]string{"--repo", repo, "--private-key", strings.Repeat("e", 64), "--dry-run", "--announce"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runPublish exit code = %d, want 2 (usage error) for --announce without --announcement-ledger", code)
+	}
+}
+
+func TestRunPublishDryRunAnnouncesNewRevision(t *testing.T) {
+	repo := newTestPackageRepo(t)
+	ledgerPath := filepath.Join(t.TempDir(), "announcements.json")
+	var stdout, stderr bytes.Buffer
+	code := runPublish([]string{
+		"--repo", repo,
+		"--private-key", strings.Repeat("e", 64),
+		"--dry-run", "--json",
+		"--announce", "--announcement-ledger", ledgerPath,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runPublish exit code = %d, stderr = %s", code, stderr.String())
+	}
+	var response publishJSONTestResult
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode publish output: %v (stdout=%s)", err, stdout.String())
+	}
+	if response.Announcement == nil {
+		t.Fatal("expected an announcement in the response, got none")
+	}
+	if response.Announcement.Skipped {
+		t.Fatal("a never-announced revision must not be reported as skipped")
+	}
+	if response.Announcement.Event == nil {
+		t.Fatal("expected a signed announcement event")
+	}
+	if response.Announcement.Event.Kind != protocol.NoteKind {
+		t.Fatalf("announcement Kind = %d, want %d", response.Announcement.Event.Kind, protocol.NoteKind)
+	}
+	if response.Announcement.Event.PubKey != response.Event.PubKey {
+		t.Fatalf("announcement signed by a different key than the declaration: declaration=%s announcement=%s",
+			response.Event.PubKey, response.Announcement.Event.PubKey)
+	}
+	if err := protocol.VerifySignature(*response.Announcement.Event); err != nil {
+		t.Fatalf("VerifySignature() on announcement error = %v", err)
+	}
+	// A dry run never actually publishes anything, so it must not touch the
+	// ledger either - only a real, successful publish should record one.
+	if _, err := os.Stat(ledgerPath); err == nil {
+		t.Fatal("--dry-run --announce must not write the announcement ledger")
+	}
+}
+
+func TestRunPublishDryRunSkipsAlreadyAnnouncedRevision(t *testing.T) {
+	repo := newTestPackageRepo(t)
+	privateKey := strings.Repeat("e", 64)
+
+	var declOut, declErr bytes.Buffer
+	if code := runPublish([]string{"--repo", repo, "--private-key", privateKey, "--dry-run", "--json"}, &declOut, &declErr); code != 0 {
+		t.Fatalf("runPublish (no announce) exit code = %d, stderr = %s", code, declErr.String())
+	}
+	var decl publishJSONTestResult
+	if err := json.Unmarshal(declOut.Bytes(), &decl); err != nil {
+		t.Fatalf("decode publish output: %v", err)
+	}
+	appID, commit := decl.Event.Tags.GetD(), decl.Event.Tags.GetFirst([]string{"commit"}).Value()
+
+	ledgerPath := filepath.Join(t.TempDir(), "announcements.json")
+	body, err := json.Marshal([]map[string]any{{
+		"app_id":       appID,
+		"commit":       commit,
+		"version":      "1.0.0~ynh1",
+		"announced_at": 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ledgerPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runPublish([]string{
+		"--repo", repo,
+		"--private-key", privateKey,
+		"--dry-run", "--json",
+		"--announce", "--announcement-ledger", ledgerPath,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runPublish exit code = %d, stderr = %s", code, stderr.String())
+	}
+	var response publishJSONTestResult
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode publish output: %v (stdout=%s)", err, stdout.String())
+	}
+	if response.Announcement == nil || !response.Announcement.Skipped {
+		t.Fatalf("expected a skipped announcement for an already-announced app_id/commit, got %+v", response.Announcement)
+	}
+	if response.Announcement.Event != nil {
+		t.Fatal("a skipped announcement must not carry an event")
+	}
+}
+
+// TestRunPublishAnnounceOnlyRecordsAfterARealPublish is the end-to-end
+// dedup property: a second, non-dry-run publish --announce for the exact
+// same commit must not post a second note, because the first call's
+// successful relay publish already recorded it in the ledger.
+func TestRunPublishAnnounceOnlyRecordsAfterARealPublish(t *testing.T) {
+	repo := newTestPackageRepo(t)
+	privateKey := strings.Repeat("f", 64)
+	relayURL := startAcceptingRelay(t)
+	ledgerPath := filepath.Join(t.TempDir(), "announcements.json")
+
+	var firstOut, firstErr bytes.Buffer
+	code := runPublish([]string{
+		"--repo", repo,
+		"--private-key", privateKey,
+		"--relays", relayURL,
+		"--json",
+		"--announce", "--announcement-ledger", ledgerPath,
+	}, &firstOut, &firstErr)
+	if code != 0 {
+		t.Fatalf("first runPublish exit code = %d, stderr = %s", code, firstErr.String())
+	}
+	var first publishJSONTestResult
+	if err := json.Unmarshal(firstOut.Bytes(), &first); err != nil {
+		t.Fatalf("decode first publish output: %v", err)
+	}
+	if first.Announcement == nil || first.Announcement.Skipped || !first.Announcement.Published {
+		t.Fatalf("expected the first publish to announce and succeed, got %+v", first.Announcement)
+	}
+
+	var secondOut, secondErr bytes.Buffer
+	code = runPublish([]string{
+		"--repo", repo,
+		"--private-key", privateKey,
+		"--relays", relayURL,
+		"--json",
+		"--announce", "--announcement-ledger", ledgerPath,
+	}, &secondOut, &secondErr)
+	if code != 0 {
+		t.Fatalf("second runPublish exit code = %d, stderr = %s", code, secondErr.String())
+	}
+	var second publishJSONTestResult
+	if err := json.Unmarshal(secondOut.Bytes(), &second); err != nil {
+		t.Fatalf("decode second publish output: %v", err)
+	}
+	if second.Announcement == nil || !second.Announcement.Skipped {
+		t.Fatalf("expected the second publish for the same commit to skip announcing, got %+v", second.Announcement)
+	}
+}
+
+func TestRunProfileDryRun(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runProfile([]string{
+		"--name", "Example Publisher",
+		"--about", "Publishes YunoHost packages",
+		"--nip05", "publisher@example.org",
+		"--private-key", strings.Repeat("a", 64),
+		"--dry-run", "--json",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runProfile exit code = %d, stderr = %s", code, stderr.String())
+	}
+	var response struct {
+		Event    nostr.Event `json:"event"`
+		Nprofile string      `json:"nprofile"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode profile output: %v (stdout=%s)", err, stdout.String())
+	}
+	if response.Event.Kind != protocol.ProfileKind {
+		t.Fatalf("Kind = %d, want %d", response.Event.Kind, protocol.ProfileKind)
+	}
+	if err := protocol.VerifySignature(response.Event); err != nil {
+		t.Fatalf("VerifySignature() error = %v", err)
+	}
+	if !strings.Contains(response.Event.Content, "Example Publisher") {
+		t.Fatalf("profile content missing name: %q", response.Event.Content)
+	}
+	if _, _, err := nip19.Decode(response.Nprofile); err != nil {
+		t.Fatalf("nprofile does not decode: %v", err)
+	}
+}
+
+func TestRunProfileRequiresPrivateKey(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runProfile([]string{"--name", "Example", "--dry-run"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runProfile exit code = %d, want 2 (usage error) for missing private key", code)
 	}
 }

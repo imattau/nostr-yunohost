@@ -15,6 +15,21 @@ inputs:
     description: nostr-yunohost module version or Git ref to install
     required: false
     default: main
+  announce:
+    description: >-
+      Also publish a kind-1 text note announcing this release (see
+      docs/profile-and-announcements.md). A local ledger keyed by
+      app_id/commit prevents re-announcing an unchanged revision, so this
+      can safely be left "true" for every run.
+    required: false
+    default: 'false'
+  announcement-ledger:
+    description: >-
+      Path to the local announcement ledger, required when announce is
+      true. Must persist across workflow runs (e.g. actions/cache) or every
+      run will re-announce - a plain job-local path defeats the dedup.
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -27,7 +42,13 @@ runs:
       env:
         NOSTR_YNH_PRIVATE_KEY: ${{ inputs.private-key }}
         NOSTR_YNH_RELAYS: ${{ inputs.relays }}
+        ANNOUNCE: ${{ inputs.announce }}
+        ANNOUNCEMENT_LEDGER: ${{ inputs.announcement-ledger }}
       run: |
         set -euo pipefail
         go install "github.com/imattau/nostr-yunohost/cmd/nostr-ynh@${{ inputs.nostr-yunohost-version }}"
-        "$(go env GOPATH)/bin/nostr-ynh" publish --repo "${{ inputs.repository }}"
+        args=(publish --repo "${{ inputs.repository }}")
+        if [ "$ANNOUNCE" = "true" ]; then
+          args+=(--announce --announcement-ledger "$ANNOUNCEMENT_LEDGER")
+        fi
+        "$(go env GOPATH)/bin/nostr-ynh" "${args[@]}"

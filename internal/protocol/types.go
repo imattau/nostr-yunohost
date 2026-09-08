@@ -13,6 +13,18 @@ import (
 
 const AppDeclarationKind int = 30078
 
+// ProfileKind and NoteKind are the standard NIP-01 kinds used to make a
+// publisher key behave like an ordinary Nostr account: a kind-0 profile
+// (name/about/picture) so the key isn't just an opaque hex string, and
+// kind-1 text notes announcing releases so updates show up in a normal
+// client feed instead of only as an unrendered replaceable event. Neither
+// is provisional - both are long-established NIP-01 kinds - unlike
+// AppDeclarationKind and verification.AttestationKind.
+const (
+	ProfileKind int = 0
+	NoteKind    int = 1
+)
+
 // Event aliases the SDK's event type so all event serialization, IDs, and
 // signature operations use the maintained Nostr implementation.
 type Event = nostr.Event

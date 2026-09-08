@@ -14,6 +14,7 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 
+	"github.com/imattau/nostr-yunohost/internal/announce"
 	"github.com/imattau/nostr-yunohost/internal/catalog"
 	"github.com/imattau/nostr-yunohost/internal/ciresult"
 	"github.com/imattau/nostr-yunohost/internal/curation"
@@ -60,6 +61,8 @@ func run(args []string, out, errOut io.Writer) int {
 		return runPreview(args[1:], out, errOut)
 	case "keygen":
 		return runKeygen(args[1:], out, errOut)
+	case "profile":
+		return runProfile(args[1:], out, errOut)
 	default:
 		fmt.Fprintf(errOut, "unknown command %q\n", args[0])
 		usage(errOut)
@@ -127,12 +130,18 @@ func runPublish(args []string, out, errOut io.Writer) int {
 	ciResultPath := flags.String("ci-result", "", "optional path to a ci-result.json (internal/ciresult schema) - when given, also builds and publishes a kind-30080 CI attestation for this exact revision, signed by the same key as the declaration")
 	ciProvider := flags.String("ci-provider", "", "CI system that produced --ci-result, e.g. github-actions (auto-detected on GitHub Actions)")
 	ciRef := flags.String("ci-ref", "", "CI run reference for --ci-result, e.g. a workflow run URL (auto-detected on GitHub Actions)")
+	announceFlag := flags.Bool("announce", false, "also publish a kind-1 text note announcing this release, signed by the same key as the declaration, unless this app_id/commit was already announced")
+	announcementLedgerPath := flags.String("announcement-ledger", os.Getenv("NOSTR_YNH_ANNOUNCEMENT_LEDGER"), "path to the local record of announcements already published by this key (required with --announce)")
 	timeoutSeconds := relayTimeoutFlag(flags)
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	if *timeoutSeconds <= 0 {
 		fmt.Fprintln(errOut, "timeout-seconds must be positive")
+		return 2
+	}
+	if *announceFlag && *announcementLedgerPath == "" {
+		fmt.Fprintln(errOut, "--announce requires --announcement-ledger (or NOSTR_YNH_ANNOUNCEMENT_LEDGER)")
 		return 2
 	}
 	if *privateKeyFile != "" {
@@ -227,9 +236,40 @@ func runPublish(args []string, out, errOut io.Writer) int {
 		attestEvent, attestAddress = &built, addr
 	}
 
+	// --announce is checked against the ledger before anything is published,
+	// not after: a commit already announced by this key must produce no
+	// announcement event at all (announceOutcome.Skipped), so a repeated
+	// publish for an unchanged revision (a re-run CI job, a manual re-publish
+	// of the same commit) can never double-post - see
+	// docs/profile-and-announcements.md.
+	var announceOut *announceOutcome
+	var announceLedger *announce.Ledger
+	if *announceFlag {
+		announceLedger, err = announce.LoadLedger(*announcementLedgerPath)
+		if err != nil {
+			fmt.Fprintf(errOut, "load announcement ledger: %v\n", err)
+			return 1
+		}
+		if announceLedger.HasAnnounced(metadata.AppID, metadata.Commit) {
+			announceOut = &announceOutcome{Skipped: true}
+		} else {
+			built, err := publisher.BuildAnnouncement(event, metadata.Repository, metadata.Name, relayURLs, *privateKey)
+			if err != nil {
+				fmt.Fprintf(errOut, "build announcement: %v\n", err)
+				return 1
+			}
+			nevent, err := nip19.EncodeEvent(built.ID, relayURLs, built.PubKey)
+			if err != nil {
+				fmt.Fprintf(errOut, "encode announcement nevent: %v\n", err)
+				return 1
+			}
+			announceOut = &announceOutcome{Event: &built, Nevent: nevent}
+		}
+	}
+
 	if *dryRun {
 		if *jsonOutput {
-			return writePublishJSON(out, event, address, nil, attestEvent, attestAddress, nil)
+			return writePublishJSON(out, event, address, nil, attestEvent, attestAddress, nil, announceOut)
 		}
 		if err := json.NewEncoder(out).Encode(event); err != nil {
 			fmt.Fprintf(errOut, "write event: %v\n", err)
@@ -242,6 +282,17 @@ func runPublish(args []string, out, errOut io.Writer) int {
 				return 1
 			}
 			fmt.Fprintf(errOut, "attestation naddr: %s\n", attestAddress)
+		}
+		if announceOut != nil {
+			if announceOut.Skipped {
+				fmt.Fprintln(errOut, "announcement: already announced this app_id/commit, skipping")
+			} else {
+				if err := json.NewEncoder(out).Encode(*announceOut.Event); err != nil {
+					fmt.Fprintf(errOut, "write announcement event: %v\n", err)
+					return 1
+				}
+				fmt.Fprintf(errOut, "announcement nevent: %s\n", announceOut.Nevent)
+			}
 		}
 		return 0
 	}
@@ -257,8 +308,20 @@ func runPublish(args []string, out, errOut io.Writer) int {
 	if attestEvent != nil {
 		attestResults = client.Publish(publishCtx, *attestEvent)
 	}
+	if announceOut != nil && announceOut.Event != nil {
+		announceOut.Results = client.Publish(publishCtx, *announceOut.Event)
+		for _, result := range announceOut.Results {
+			if result.Error == nil {
+				if err := announceLedger.Record(metadata.AppID, metadata.Commit, metadata.Version, announceOut.Event.ID, announceOut.Nevent); err != nil {
+					fmt.Fprintf(errOut, "record announcement: %v\n", err)
+					return 1
+				}
+				break
+			}
+		}
+	}
 	if *jsonOutput {
-		return writePublishJSON(out, event, address, results, attestEvent, attestAddress, attestResults)
+		return writePublishJSON(out, event, address, results, attestEvent, attestAddress, attestResults, announceOut)
 	}
 	if err := json.NewEncoder(out).Encode(event); err != nil {
 		fmt.Fprintf(errOut, "write event: %v\n", err)
@@ -293,18 +356,52 @@ func runPublish(args []string, out, errOut io.Writer) int {
 			return 1
 		}
 	}
+	if announceOut != nil {
+		if announceOut.Skipped {
+			fmt.Fprintln(errOut, "announcement: already announced this app_id/commit, skipping")
+		} else {
+			if err := json.NewEncoder(out).Encode(*announceOut.Event); err != nil {
+				fmt.Fprintf(errOut, "write announcement event: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(errOut, "announcement nevent: %s\n", announceOut.Nevent)
+			announceSucceeded := 0
+			for _, result := range announceOut.Results {
+				if result.Error != nil {
+					fmt.Fprintf(errOut, "%s: %v\n", result.Relay, result.Error)
+					continue
+				}
+				announceSucceeded++
+				fmt.Fprintf(errOut, "%s: announcement published\n", result.Relay)
+			}
+			if announceSucceeded == 0 {
+				return 1
+			}
+		}
+	}
 	if succeeded == 0 {
 		return 1
 	}
 	return 0
 }
 
+// announceOutcome carries the --announce result through the dry-run/publish
+// and text/JSON output paths uniformly, whether an announcement was actually
+// built (Event/Nevent/Results) or skipped as already-announced (Skipped).
+type announceOutcome struct {
+	Event   *nostr.Event
+	Nevent  string
+	Results []relay.PublishResult
+	Skipped bool
+}
+
 type publishJSONResult struct {
-	Event       nostr.Event          `json:"event"`
-	Naddr       string               `json:"naddr"`
-	Published   bool                 `json:"published"`
-	Relays      []publishRelayResult `json:"relays"`
-	Attestation *attestJSONResult    `json:"attestation,omitempty"`
+	Event        nostr.Event          `json:"event"`
+	Naddr        string               `json:"naddr"`
+	Published    bool                 `json:"published"`
+	Relays       []publishRelayResult `json:"relays"`
+	Attestation  *attestJSONResult    `json:"attestation,omitempty"`
+	Announcement *announceJSONResult  `json:"announcement,omitempty"`
 }
 
 type publishRelayResult struct {
@@ -313,7 +410,15 @@ type publishRelayResult struct {
 	Error     string `json:"error,omitempty"`
 }
 
-func writePublishJSON(out io.Writer, event nostr.Event, address string, results []relay.PublishResult, attestEvent *nostr.Event, attestAddress string, attestResults []relay.PublishResult) int {
+type announceJSONResult struct {
+	Skipped   bool                 `json:"skipped"`
+	Event     *nostr.Event         `json:"event,omitempty"`
+	Nevent    string               `json:"nevent,omitempty"`
+	Published bool                 `json:"published"`
+	Relays    []publishRelayResult `json:"relays"`
+}
+
+func writePublishJSON(out io.Writer, event nostr.Event, address string, results []relay.PublishResult, attestEvent *nostr.Event, attestAddress string, attestResults []relay.PublishResult, announceOut *announceOutcome) int {
 	response := publishJSONResult{Event: event, Naddr: address, Relays: []publishRelayResult{}}
 	for _, result := range results {
 		relayResult := publishRelayResult{Relay: result.Relay, Published: result.Error == nil}
@@ -335,6 +440,18 @@ func writePublishJSON(out io.Writer, event nostr.Event, address string, results 
 		}
 		response.Attestation = &attestation
 	}
+	if announceOut != nil {
+		announcement := announceJSONResult{Skipped: announceOut.Skipped, Event: announceOut.Event, Nevent: announceOut.Nevent, Relays: []publishRelayResult{}}
+		for _, result := range announceOut.Results {
+			relayResult := publishRelayResult{Relay: result.Relay, Published: result.Error == nil}
+			if result.Error != nil {
+				relayResult.Error = result.Error.Error()
+			}
+			announcement.Relays = append(announcement.Relays, relayResult)
+			announcement.Published = announcement.Published || relayResult.Published
+		}
+		response.Announcement = &announcement
+	}
 	if err := json.NewEncoder(out).Encode(response); err != nil {
 		return 1
 	}
@@ -342,6 +459,9 @@ func writePublishJSON(out io.Writer, event nostr.Event, address string, results 
 		return 1
 	}
 	if response.Attestation != nil && len(attestResults) > 0 && !response.Attestation.Published {
+		return 1
+	}
+	if response.Announcement != nil && !response.Announcement.Skipped && len(announceOut.Results) > 0 && !response.Announcement.Published {
 		return 1
 	}
 	return 0
@@ -927,6 +1047,134 @@ func runKeygen(args []string, out, errOut io.Writer) int {
 	return 0
 }
 
+// runProfile publishes a kind-0 profile metadata event for the given key, so
+// it resolves to a name/picture in ordinary Nostr clients instead of an
+// opaque hex string - see docs/profile-and-announcements.md. It is meant to
+// run once at setup and again whenever the profile changes; publishing again
+// simply supersedes the previous profile per NIP-01 kind-0 semantics, no
+// address or dedup ledger involved.
+func runProfile(args []string, out, errOut io.Writer) int {
+	flags := flag.NewFlagSet("profile", flag.ContinueOnError)
+	flags.SetOutput(errOut)
+	name := flags.String("name", "", "publisher display name")
+	about := flags.String("about", "", "short publisher bio")
+	picture := flags.String("picture", "", "publisher avatar URL")
+	nip05 := flags.String("nip05", "", "NIP-05 identifier, e.g. publisher@example.org")
+	website := flags.String("website", "", "publisher homepage URL")
+	privateKey := flags.String("private-key", os.Getenv("NOSTR_YNH_PRIVATE_KEY"), "Nostr publishing private key")
+	privateKeyFile := flags.String("private-key-file", "", "file containing the Nostr publishing private key")
+	relayList := flags.String("relays", os.Getenv("NOSTR_YNH_RELAYS"), "comma-separated relay URLs")
+	dryRun := flags.Bool("dry-run", false, "build and sign the event without publishing")
+	jsonOutput := flags.Bool("json", false, "emit one machine-readable JSON result")
+	timeoutSeconds := relayTimeoutFlag(flags)
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if *timeoutSeconds <= 0 {
+		fmt.Fprintln(errOut, "timeout-seconds must be positive")
+		return 2
+	}
+	if *privateKeyFile != "" {
+		if *privateKey != "" {
+			fmt.Fprintln(errOut, "use only one of --private-key, --private-key-file, or NOSTR_YNH_PRIVATE_KEY")
+			return 2
+		}
+		data, err := os.ReadFile(*privateKeyFile)
+		if err != nil {
+			fmt.Fprintf(errOut, "read private key file: %v\n", err)
+			return 1
+		}
+		*privateKey = strings.TrimSpace(string(data))
+	}
+	if *privateKey == "" || (!*dryRun && *relayList == "") {
+		fmt.Fprintln(errOut, "profile requires --private-key (or NOSTR_YNH_PRIVATE_KEY) and --relays (or NOSTR_YNH_RELAYS), unless --dry-run is used")
+		return 2
+	}
+	event, err := publisher.BuildProfile(publisher.Profile{
+		Name:    *name,
+		About:   *about,
+		Picture: *picture,
+		Nip05:   *nip05,
+		Website: *website,
+	}, *privateKey)
+	if err != nil {
+		fmt.Fprintf(errOut, "build profile: %v\n", err)
+		return 1
+	}
+	relayURLs := splitNonEmpty(*relayList)
+	nprofile, err := nip19.EncodeProfile(event.PubKey, relayURLs)
+	if err != nil {
+		fmt.Fprintf(errOut, "encode nprofile: %v\n", err)
+		return 1
+	}
+	if *dryRun {
+		if *jsonOutput {
+			return writeProfileJSON(out, event, nprofile, nil)
+		}
+		if err := json.NewEncoder(out).Encode(event); err != nil {
+			fmt.Fprintf(errOut, "write event: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(errOut, "nprofile: %s\n", nprofile)
+		return 0
+	}
+	client, err := relay.New(context.Background(), relayURLs)
+	if err != nil {
+		fmt.Fprintf(errOut, "configure relays: %v\n", err)
+		return 1
+	}
+	publishCtx, cancel := context.WithTimeout(context.Background(), relayTimeout(*timeoutSeconds))
+	defer cancel()
+	results := client.Publish(publishCtx, event)
+	if *jsonOutput {
+		return writeProfileJSON(out, event, nprofile, results)
+	}
+	if err := json.NewEncoder(out).Encode(event); err != nil {
+		fmt.Fprintf(errOut, "write event: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(errOut, "nprofile: %s\n", nprofile)
+	succeeded := 0
+	for _, result := range results {
+		if result.Error != nil {
+			fmt.Fprintf(errOut, "%s: %v\n", result.Relay, result.Error)
+			continue
+		}
+		succeeded++
+		fmt.Fprintf(errOut, "%s: published\n", result.Relay)
+	}
+	if succeeded == 0 {
+		return 1
+	}
+	return 0
+}
+
+type profileJSONResult struct {
+	Event     nostr.Event          `json:"event"`
+	Nprofile  string               `json:"nprofile"`
+	Published bool                 `json:"published"`
+	Relays    []publishRelayResult `json:"relays"`
+}
+
+func writeProfileJSON(out io.Writer, event nostr.Event, nprofile string, results []relay.PublishResult) int {
+	response := profileJSONResult{Event: event, Nprofile: nprofile, Relays: []publishRelayResult{}}
+	for _, result := range results {
+		relayResult := publishRelayResult{Relay: result.Relay, Published: result.Error == nil}
+		if result.Error != nil {
+			relayResult.Error = result.Error.Error()
+		}
+		response.Relays = append(response.Relays, relayResult)
+		response.Published = response.Published || relayResult.Published
+	}
+	if err := json.NewEncoder(out).Encode(response); err != nil {
+		return 1
+	}
+	if len(results) > 0 && !response.Published {
+		return 1
+	}
+	return 0
+}
+
 func splitNonEmpty(raw string) []string {
 	var values []string
 	for _, value := range strings.Split(raw, ",") {
@@ -973,7 +1221,7 @@ func envIntOrDefault(key string, fallback int) int {
 func usage(out io.Writer) {
 	fmt.Fprintln(out, "usage:")
 	fmt.Fprintln(out, "  nostr-ynh verify [--json] <event.json>")
-	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex>|--private-key-file <path> --relays <ws://...,...> [--repo <path>|--repository-url <url> --ref <ref>] [--dry-run] [--json] [--timeout-seconds <n>]")
+	fmt.Fprintln(out, "  nostr-ynh publish --private-key <hex>|--private-key-file <path> --relays <ws://...,...> [--repo <path>|--repository-url <url> --ref <ref>] [--ci-result <path> [--ci-provider <name>] [--ci-ref <ref>]] [--announce --announcement-ledger <path>] [--dry-run] [--json] [--timeout-seconds <n>]")
 	fmt.Fprintln(out, "  nostr-ynh inspect [--json] [--relays <ws://...,...>] [--timeout-seconds <n>] <naddr>")
 	fmt.Fprintln(out, "  nostr-ynh endorse [--claim recommend|tested] [--comment <text>] [--private-key <hex>|--private-key-file <path>] [--relays <ws://...,...>] [--timeout-seconds <n>] <naddr>")
 	fmt.Fprintln(out, "  nostr-ynh attest --ci-result <path> [--ci-provider <name>] [--ci-ref <ref>] --private-key <hex>|--private-key-file <path> --relays <ws://...,...> [--dry-run] [--json] [--timeout-seconds <n>]")
@@ -981,5 +1229,6 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "  nostr-ynh catalog --relays <ws://...,...> --trusted-publishers <npub,...> [--timeout-seconds <n>] [--budget-seconds <n>]")
 	fmt.Fprintln(out, "  nostr-ynh preview [--ref <branch|tag|commit>] <repository-url>")
 	fmt.Fprintln(out, "  nostr-ynh keygen")
+	fmt.Fprintln(out, "  nostr-ynh profile [--name <text>] [--about <text>] [--picture <url>] [--nip05 <name@domain>] [--website <url>] --private-key <hex>|--private-key-file <path> --relays <ws://...,...> [--dry-run] [--json] [--timeout-seconds <n>]")
 	fmt.Fprintln(out, "  nostr-ynh version")
 }

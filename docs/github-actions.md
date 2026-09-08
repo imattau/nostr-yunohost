@@ -54,3 +54,33 @@ hashes for administrator confirmation.
 The action currently defaults to `main` because this project has not released a
 versioned binary yet. Once releases exist, workflows should pin
 `nostr-yunohost-version` to a release tag or immutable commit.
+
+## Announcing releases as notes
+
+Setting `announce: true` also publishes a kind-1 text note alongside the
+declaration, signed by the same key, so the release shows up in an ordinary
+Nostr client feed - see `docs/profile-and-announcements.md`. This requires
+`announcement-ledger`, a path to a small local file that tracks which
+`(app_id, commit)` pairs this key has already announced, so re-running the
+same tag/release trigger never posts a duplicate note. That file must
+persist across workflow runs - typically via `actions/cache` keyed on the
+repository - or every run effectively re-announces:
+
+```yaml
+      - uses: actions/cache@v4
+        with:
+          path: .nostr-ynh/announcements.json
+          key: nostr-ynh-announcements
+
+      - uses: imattau/nostr-yunohost@main
+        with:
+          relays: wss://relay.example-a,wss://relay.example-b
+          private-key: ${{ secrets.NOSTR_YNH_PUBLISHING_KEY }}
+          announce: 'true'
+          announcement-ledger: .nostr-ynh/announcements.json
+```
+
+The publisher's kind-0 profile (name/picture/about) is separate and only
+needs setting once - see `nostr-ynh profile` in
+`docs/profile-and-announcements.md` - rather than on every release workflow
+run.

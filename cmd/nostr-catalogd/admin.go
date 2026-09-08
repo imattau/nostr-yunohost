@@ -7,11 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/imattau/nostr-yunohost/internal/announce"
 	"github.com/imattau/nostr-yunohost/internal/attestation"
 	"github.com/imattau/nostr-yunohost/internal/catalog"
 	"github.com/imattau/nostr-yunohost/internal/localstate"
+	"github.com/imattau/nostr-yunohost/internal/publisher"
 	"github.com/imattau/nostr-yunohost/internal/reverify"
 )
 
@@ -33,11 +37,13 @@ const csrfCookieName = "nostr_catalog_csrf"
 // CSRF check below is defense in depth against a same-origin browser
 // session riding an admin's cookies, not the primary access control.
 type adminServer struct {
-	store         *catalog.Store
-	publisher     *attestation.Publisher
-	ledger        *attestation.Ledger
-	selfPublisher string
-	installedPath string
+	store          *catalog.Store
+	publisher      *attestation.Publisher
+	ledger         *attestation.Ledger
+	selfPublisher  string
+	installedPath  string
+	announceLedger *announce.Ledger
+	profilePath    string
 }
 
 func (s *adminServer) candidates() ([]attestation.Candidate, error) {
@@ -59,6 +65,9 @@ func (s *adminServer) mux() *http.ServeMux {
 	mux.HandleFunc("/admin/history", s.handleHistory)
 	mux.HandleFunc("/admin/trust", s.handleTrust)
 	mux.HandleFunc("/admin/reverify", s.handleReverify)
+	mux.HandleFunc("/admin/profile", s.handleProfile)
+	mux.HandleFunc("/admin/announcements", s.handleAnnouncements)
+	mux.HandleFunc("/admin/announce", s.handleAnnounce)
 	return mux
 }
 
@@ -283,4 +292,195 @@ func (s *adminServer) handleHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(s.ledger.History())
+}
+
+// loadProfileState reads this server's last-published kind-0 profile
+// fields from its local cache file. A missing file means nothing has been
+// published yet through this admin page and is not an error - the page
+// simply shows an empty form. This is deliberately a local cache rather
+// than a relay fetch on every page load: the admin page is the only writer
+// of this key's profile in the self-publishing setup this route is for
+// (see docs/profile-and-announcements.md), so what this server last sent
+// is authoritative for its own display purposes.
+func loadProfileState(path string) (publisher.Profile, error) {
+	var profile publisher.Profile
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return profile, nil
+		}
+		return profile, fmt.Errorf("read profile state: %w", err)
+	}
+	if err := json.Unmarshal(data, &profile); err != nil {
+		return profile, fmt.Errorf("decode profile state: %w", err)
+	}
+	return profile, nil
+}
+
+// saveProfileState persists the profile fields atomically, mirroring
+// attestation.Ledger.Record's write pattern.
+func saveProfileState(path string, profile publisher.Profile) error {
+	data, err := json.Marshal(profile)
+	if err != nil {
+		return fmt.Errorf("encode profile state: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("create profile state directory: %w", err)
+	}
+	temporaryPath := path + ".tmp"
+	if err := os.WriteFile(temporaryPath, append(data, '\n'), 0o640); err != nil {
+		return fmt.Errorf("write profile state: %w", err)
+	}
+	return os.Rename(temporaryPath, path)
+}
+
+type profileResponse struct {
+	CSRFToken     string            `json:"csrf_token"`
+	Profile       publisher.Profile `json:"profile"`
+	SelfPublisher string            `json:"self_publisher"`
+}
+
+// handleProfile serves this server's own last-published kind-0 profile
+// (GET) and republishes it with edited fields (POST) - see
+// docs/profile-and-announcements.md. This is the same publisher key
+// already used for self-endorsements/self-attestations, so no separate key
+// material or flag is needed beyond what --publisher-key-file already
+// provides.
+func (s *adminServer) handleProfile(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		profile, err := loadProfileState(s.profilePath)
+		if err != nil {
+			http.Error(w, "failed to load profile", http.StatusInternalServerError)
+			return
+		}
+		token, err := issueCSRFToken(w, r)
+		if err != nil {
+			http.Error(w, "failed to issue CSRF token", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(profileResponse{CSRFToken: token, Profile: profile, SelfPublisher: s.selfPublisher})
+	case http.MethodPost:
+		if !checkCSRF(r) {
+			http.Error(w, "invalid CSRF token", http.StatusForbidden)
+			return
+		}
+		var profile publisher.Profile
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&profile); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		event, err := publisher.BuildProfile(profile, s.publisher.PrivateKey)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("build profile: %v", err), http.StatusBadRequest)
+			return
+		}
+		results := s.publisher.Client.Publish(r.Context(), event)
+		outcomes := make([]publishOutcome, 0, len(results))
+		published := false
+		for _, result := range results {
+			outcome := publishOutcome{Relay: result.Relay}
+			if result.Error != nil {
+				outcome.Error = result.Error.Error()
+			} else {
+				published = true
+			}
+			outcomes = append(outcomes, outcome)
+		}
+		// Only cache the edited fields locally once at least one relay
+		// actually accepted the event - a total publish failure should leave
+		// the admin page showing what is still genuinely live, not a profile
+		// nobody has seen, so a retry starts from the right form contents.
+		if published {
+			if err := saveProfileState(s.profilePath, profile); err != nil {
+				http.Error(w, fmt.Sprintf("save profile: %v", err), http.StatusInternalServerError)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(outcomes)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleAnnouncements returns every announcement note this server has
+// published, most recent first - the admin page's read-only history table.
+func (s *adminServer) handleAnnouncements(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.announceLedger.History())
+}
+
+type announceRequest struct {
+	AppID     string `json:"app_id"`
+	Publisher string `json:"publisher"`
+	Commit    string `json:"commit"`
+}
+
+// handleAnnounce lets an admin manually post a kind-1 announcement note for
+// a declaration this server itself published and this store has already
+// accepted - never for another publisher's declaration, since this key
+// signing an announcement is a claim about its own release, not someone
+// else's (see the manual re-announce case in
+// docs/profile-and-announcements.md). Deduped against the same
+// announceLedger publish --announce uses, so a revision already announced
+// (by this page or by publish --announce sharing the same ledger file)
+// cannot be posted again from here either.
+func (s *adminServer) handleAnnounce(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkCSRF(r) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	var req announceRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Publisher != s.selfPublisher {
+		http.Error(w, "can only announce this server's own declarations", http.StatusBadRequest)
+		return
+	}
+	declaration, _, ok := s.store.RevisionAttestations(req.AppID, req.Publisher, req.Commit)
+	if !ok {
+		http.Error(w, "not an accepted revision", http.StatusNotFound)
+		return
+	}
+	if s.announceLedger.HasAnnounced(declaration.AppID, declaration.Commit) {
+		http.Error(w, "already announced", http.StatusConflict)
+		return
+	}
+	event, err := publisher.BuildAnnouncementForDeclaration(declaration, nil, s.publisher.PrivateKey)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("build announcement: %v", err), http.StatusInternalServerError)
+		return
+	}
+	results := s.publisher.Client.Publish(r.Context(), event)
+	outcomes := make([]publishOutcome, 0, len(results))
+	published := false
+	for _, result := range results {
+		outcome := publishOutcome{Relay: result.Relay}
+		if result.Error != nil {
+			outcome.Error = result.Error.Error()
+		} else {
+			published = true
+		}
+		outcomes = append(outcomes, outcome)
+	}
+	if published {
+		if err := s.announceLedger.Record(declaration.AppID, declaration.Commit, declaration.Version, event.ID, ""); err != nil {
+			http.Error(w, fmt.Sprintf("record announcement: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(outcomes)
 }
