@@ -61,8 +61,11 @@ Tagged core releases build one tarball per architecture
 running service) and `nostr-ynh` (used only at install time, for
 `keygen`/`profile`). `manifest.toml`'s `resources.sources.main` pins one of
 these tarballs per architecture by version and checksum rather than
-compiling on the YunoHost server; the URLs/checksums are placeholders until
-the first tagged release exists.
+compiling on the YunoHost server; it is currently pinned to `v0.1.25`.
+Bumping to a newer release means updating `version`, every architecture's
+`url`, and every architecture's `sha256` in the same commit - checksums
+should come from the release's own `SHA256SUMS` asset (or an independent
+local re-download/re-hash), not typed by hand.
 
 ## Publisher key
 
