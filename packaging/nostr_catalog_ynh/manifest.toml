@@ -5,7 +5,7 @@ name = "Nostr Catalogue"
 description.en = "Decentralised YunoHost app catalogue published over Nostr"
 description.fr = "Catalogue d'applications YunoHost décentralisé, publié via Nostr"
 
-version = "0.1.0~ynh1"
+version = "0.1.25~ynh1"
 
 maintainers = []
 
@@ -69,19 +69,21 @@ ram.runtime = "50M"
     # running service) and nostr-ynh (used only at install time, for
     # `keygen`/`profile`). Pinned by version+checksum, per
     # docs/yunohost-wrapper.md - this wrapper never compiles on the
-    # YunoHost server. Placeholder checksums until the first tagged
-    # release exists; update url/sha256 together per architecture.
+    # YunoHost server. Pinned to v0.1.25 (checksums verified against the
+    # release's own SHA256SUMS and by an independent local re-download/
+    # re-hash, not just copied from the GitHub UI); bump url+sha256
+    # together on every future release this packaging adopts.
     [resources.sources.main.amd64]
-    url = "https://github.com/imattau/nostr-yunohost/releases/download/vVERSION/nostr-yunohost-linux-amd64.tar.gz"
-    sha256 = "REPLACE_WITH_RELEASE_CHECKSUM"
+    url = "https://github.com/imattau/nostr-yunohost/releases/download/v0.1.25/nostr-yunohost-linux-amd64.tar.gz"
+    sha256 = "6d85cdd5973783932def875055a5a34268ff605e3a2900e324cb2ae6fcdf850a"
 
     [resources.sources.main.arm64]
-    url = "https://github.com/imattau/nostr-yunohost/releases/download/vVERSION/nostr-yunohost-linux-arm64.tar.gz"
-    sha256 = "REPLACE_WITH_RELEASE_CHECKSUM"
+    url = "https://github.com/imattau/nostr-yunohost/releases/download/v0.1.25/nostr-yunohost-linux-arm64.tar.gz"
+    sha256 = "a740d8913bc9a7476a42ae7435f0ab6d9491939d1aae417bdc3d58712ca4cd06"
 
     [resources.sources.main.armhf]
-    url = "https://github.com/imattau/nostr-yunohost/releases/download/vVERSION/nostr-yunohost-linux-armv7.tar.gz"
-    sha256 = "REPLACE_WITH_RELEASE_CHECKSUM"
+    url = "https://github.com/imattau/nostr-yunohost/releases/download/v0.1.25/nostr-yunohost-linux-armv7.tar.gz"
+    sha256 = "e54347bf7e5aa39a535bd6e482f0187edc2bd9c54975590ff2952dd95f974b2c"
 
     [resources.system_user]
 
