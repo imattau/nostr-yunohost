@@ -1,0 +1,108 @@
+packaging_format = 2
+
+id = "nostr_catalog"
+name = "Nostr Catalogue"
+description.en = "Decentralised YunoHost app catalogue published over Nostr"
+description.fr = "Catalogue d'applications YunoHost décentralisé, publié via Nostr"
+
+version = "0.1.0~ynh1"
+
+maintainers = []
+
+[upstream]
+license = "AGPL-3.0-or-later"
+website = "https://github.com/imattau/nostr-yunohost"
+code = "https://github.com/imattau/nostr-yunohost"
+
+[integration]
+yunohost = ">= 11.2"
+architectures = ["amd64", "arm64", "armv7"]
+multi_instance = false
+ldap = false
+sso = false
+disk = "100M"
+ram.build = "50M"
+ram.runtime = "50M"
+
+[install]
+    [install.domain]
+    type = "domain"
+
+    [install.path]
+    ask.en = "Choose a path for the trust/attestation admin page"
+    type = "path"
+    default = "/nostr-catalog-admin"
+
+    [install.init_main_permission]
+    type = "group"
+    default = "admins"
+
+    [install.relays]
+    ask.en = "Comma-separated Nostr relay URLs to read the catalogue from"
+    type = "string"
+    default = ""
+
+    [install.trusted_publishers]
+    ask.en = "Comma-separated trusted publisher npubs/hex keys"
+    type = "string"
+    default = ""
+
+    # profile_name/profile_about seed a one-time `nostr-ynh profile` call in
+    # scripts/install (see docs/profile-and-announcements.md) - nostr-catalogd
+    # itself never reads these; editing the profile afterwards happens live
+    # through the admin page's own "Publisher profile" section instead.
+    [install.profile_name]
+    ask.en = "Publisher display name (optional, kind-0 profile - see docs/profile-and-announcements.md)"
+    type = "string"
+    default = ""
+    optional = true
+
+    [install.profile_about]
+    ask.en = "Publisher short bio (optional)"
+    type = "string"
+    default = ""
+    optional = true
+
+[resources]
+    # .github/workflows/release.yml publishes one tarball per architecture,
+    # each containing both binaries this app needs: nostr-catalogd (the
+    # running service) and nostr-ynh (used only at install time, for
+    # `keygen`/`profile`). Pinned by version+checksum, per
+    # docs/yunohost-wrapper.md - this wrapper never compiles on the
+    # YunoHost server. Placeholder checksums until the first tagged
+    # release exists; update url/sha256 together per architecture.
+    [resources.sources.main.amd64]
+    url = "https://github.com/imattau/nostr-yunohost/releases/download/vVERSION/nostr-yunohost-linux-amd64.tar.gz"
+    sha256 = "REPLACE_WITH_RELEASE_CHECKSUM"
+
+    [resources.sources.main.arm64]
+    url = "https://github.com/imattau/nostr-yunohost/releases/download/vVERSION/nostr-yunohost-linux-arm64.tar.gz"
+    sha256 = "REPLACE_WITH_RELEASE_CHECKSUM"
+
+    [resources.sources.main.armhf]
+    url = "https://github.com/imattau/nostr-yunohost/releases/download/vVERSION/nostr-yunohost-linux-armv7.tar.gz"
+    sha256 = "REPLACE_WITH_RELEASE_CHECKSUM"
+
+    [resources.system_user]
+
+    [resources.install_dir]
+
+    [resources.permissions.main]
+    url = "/"
+    show_tile = true
+    protected = false
+
+    [resources.ports.catalog]
+    # The catalogue JSON server (/v3/apps.json). Loopback-only, never
+    # proxied by nginx: it is consumed directly by yunohost's custom
+    # catalogue mechanism over 127.0.0.1, not by a browser - see
+    # docs/yunohost-wrapper.md.
+    default = 8090
+    exposed = false
+
+    [resources.ports.admin]
+    # The trust/attestation/profile admin page (cmd/nostr-catalogd's
+    # --admin-listen), reverse-proxied by nginx behind the "main"
+    # permission above (admins only).
+    default = 8091
+    exposed = "both"

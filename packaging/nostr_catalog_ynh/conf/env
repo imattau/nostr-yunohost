@@ -1,0 +1,9 @@
+# Managed by nostr_catalog_ynh's install/upgrade scripts and config panel
+# (config_panel.toml) - do not edit by hand, changes will be overwritten.
+# Only variables nostr-catalogd itself reads via os.Getenv belong here -
+# the publisher profile is edited live through the admin page instead (see
+# docs/profile-and-announcements.md), not through this file.
+NOSTR_YNH_RELAYS=__RELAYS__
+NOSTR_YNH_TRUSTED_PUBLISHERS=__TRUSTED_PUBLISHERS__
+NOSTR_YNH_TRUSTED_CURATORS=
+NOSTR_YNH_ATTESTATION_POLICY=off

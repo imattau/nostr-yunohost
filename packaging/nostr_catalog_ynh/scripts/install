@@ -1,0 +1,69 @@
+#!/bin/bash
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+ynh_script_progression "Configuring firewall and system settings"
+
+port_catalog=$(ynh_find_port --port=8090)
+ynh_app_setting_set --app=$app --key=port_catalog --value=$port_catalog
+port_admin=$(ynh_find_port --port=8091)
+ynh_app_setting_set --app=$app --key=port_admin --value=$port_admin
+
+ynh_script_progression "Downloading nostr-catalogd and nostr-ynh"
+
+# The release tarball for this architecture contains both binaries -
+# see resources.sources.main in manifest.toml.
+ynh_setup_source --dest_dir="$install_dir"
+chmod +x "$install_dir/nostr-catalogd" "$install_dir/nostr-ynh"
+chown -R $app:$app "$install_dir"
+
+ynh_script_progression "Generating this server's own Nostr publishing key"
+
+# This key is used both as the daemon's own curator/attestation identity
+# (--publisher-key-file, see docs/attestations.md) and, if this server also
+# publishes its own app declarations, as the publisher key those are signed
+# with (docs/profile-and-announcements.md's self-publishing case). It is
+# never uploaded or logged - only the resulting public key appears in
+# install feedback, via `nostr-ynh keygen`'s JSON output.
+if [ ! -f "$install_dir/publisher.key" ]; then
+    keygen_output=$(su - $app -s /bin/bash -c "$install_dir/nostr-ynh keygen")
+    echo "$keygen_output" | jq -r .private_key_hex > "$install_dir/publisher.key"
+    npub=$(echo "$keygen_output" | jq -r .npub)
+    ynh_app_setting_set --app=$app --key=publisher_npub --value="$npub"
+fi
+chmod 600 "$install_dir/publisher.key"
+chown $app:$app "$install_dir/publisher.key"
+
+ynh_script_progression "Writing configuration"
+
+mkdir -p /etc/nostr_catalog
+ynh_add_config --template="../conf/env" --destination="$nostr_catalogd_env_file"
+chmod 640 "$nostr_catalogd_env_file"
+chown root:$app "$nostr_catalogd_env_file"
+
+ynh_add_config --template="../conf/nostr-catalogd.service" --destination="/etc/systemd/system/$app.service"
+
+ynh_script_progression "Publishing the initial publisher profile"
+
+if [ -n "${profile_name:-}" ] || [ -n "${profile_about:-}" ]; then
+    if [ -n "${relays:-}" ]; then
+        su - $app -s /bin/bash -c \
+            "$install_dir/nostr-ynh profile --name '$profile_name' --about '$profile_about' --private-key-file '$install_dir/publisher.key' --relays '$relays'" \
+            || ynh_print_warn --message="Publishing the initial profile failed - it can be retried later from the admin page's Publisher profile section."
+    else
+        ynh_print_warn --message="No relays configured yet; skipping the initial profile publish. Set relays in the config panel, then publish the profile from the admin page."
+    fi
+fi
+
+ynh_script_progression "Configuring the systemd service"
+
+yunohost service add $app --description="Nostr Catalogue daemon" --log="/var/log/$app/$app.log"
+systemctl enable $app.service
+systemctl start $app.service
+
+ynh_script_progression "Configuring nginx for the admin page"
+
+ynh_add_nginx_config
+
+ynh_script_progression "Installation complete" --last

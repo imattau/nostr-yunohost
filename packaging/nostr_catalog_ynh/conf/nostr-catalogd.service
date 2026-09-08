@@ -1,0 +1,29 @@
+[Unit]
+Description=Nostr Catalogue daemon (__APP__)
+After=network.target
+
+[Service]
+Type=simple
+User=__APP__
+Group=__APP__
+WorkingDirectory=__INSTALL_DIR__
+EnvironmentFile=/etc/nostr_catalog/env
+ExecStart=__INSTALL_DIR__/nostr-catalogd \
+  --listen 127.0.0.1:__PORT_CATALOG__ \
+  --admin-listen 127.0.0.1:__PORT_ADMIN__ \
+  --cache __INSTALL_DIR__/catalogue-cache.json \
+  --publisher-key-file __INSTALL_DIR__/publisher.key \
+  --installed-apps-file __INSTALL_DIR__/installed-apps.json \
+  --attestation-ledger __INSTALL_DIR__/attestation-ledger.json \
+  --announcement-ledger __INSTALL_DIR__/announcement-ledger.json \
+  --profile-state-file __INSTALL_DIR__/publisher-profile.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__INSTALL_DIR__
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

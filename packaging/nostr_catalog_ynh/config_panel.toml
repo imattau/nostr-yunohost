@@ -1,0 +1,41 @@
+version = "1.0"
+
+[main]
+name.en = "Nostr Catalogue settings"
+
+    [main.relays_and_trust]
+    name.en = "Relays and trust policy"
+
+        [main.relays_and_trust.relays]
+        ask.en = "Comma-separated Nostr relay URLs"
+        type = "string"
+        bind = "NOSTR_YNH_RELAYS:/etc/nostr_catalog/env"
+
+        [main.relays_and_trust.trusted_publishers]
+        ask.en = "Comma-separated trusted publisher npubs/hex keys"
+        type = "string"
+        bind = "NOSTR_YNH_TRUSTED_PUBLISHERS:/etc/nostr_catalog/env"
+
+        [main.relays_and_trust.trusted_curators]
+        ask.en = "Comma-separated trusted curator npubs/hex keys (optional)"
+        type = "string"
+        default = ""
+        optional = true
+        bind = "NOSTR_YNH_TRUSTED_CURATORS:/etc/nostr_catalog/env"
+
+        [main.relays_and_trust.attestation_policy]
+        ask.en = "How CI attestations affect the generated catalogue"
+        type = "select"
+        choices = ["off", "prefer", "require"]
+        default = "off"
+        bind = "NOSTR_YNH_ATTESTATION_POLICY:/etc/nostr_catalog/env"
+
+# Publisher profile and announcements (kind-0/kind-1, see
+# docs/profile-and-announcements.md) are deliberately NOT config-panel
+# fields: nostr-catalogd never reads a NOSTR_YNH_PROFILE_* env var, so there
+# is nothing here for a bind to wire up. The admin page's own "Publisher
+# profile" section (GET/POST /admin/profile) already builds, signs, and
+# publishes the event directly - editing it there takes effect immediately,
+# with no service restart, which a config-panel field re-rendering an env
+# file cannot offer. install.profile_name/install.profile_about in
+# manifest.toml only seed that first value at install time.
