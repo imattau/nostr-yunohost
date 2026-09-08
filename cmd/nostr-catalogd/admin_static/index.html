@@ -4,18 +4,25 @@
 <meta charset="utf-8">
 <title>Nostr Catalogue</title>
 <style>
-  /* Token set mirrors shadcn/ui's "classic" theme (as used by Alby Hub's
-     frontend, github.com/getAlby/hub) - oklch colors, a 0.625rem base
-     radius scaled up/down per element, flat bordered cards with no shadow,
-     and a light/dark pair switched by prefers-color-scheme since this page
-     has no theme-toggle state to persist anywhere. */
+  /* Structure (cards/radius/layout) mirrors shadcn/ui's "classic" theme as
+     used by Alby Hub's frontend (github.com/getAlby/hub). Colors use
+     that same codebase's own purple "Nostr" theme
+     (frontend/src/themes/nostr.css's --primary/--sidebar-primary, unchanged
+     values) for --primary/--ring/--sidebar-primary, plus blue and orange
+     (its existing warning tokens are already orange-hued) as the two
+     accent hues for "Verified"/"Informational" badges - a three-hue nod to
+     Nostr client branding generally, not just Alby's. Red/--destructive
+     stays for the one genuine danger state (excluded/mismatch) rather than
+     being swapped out - that's a universal safety convention, not a brand
+     color. Light/dark pair switched by prefers-color-scheme since this
+     page has no theme-toggle state to persist anywhere. */
   :root {
     --background: oklch(1 0 0);
     --foreground: oklch(0.145 0 0);
     --card: oklch(1 0 0);
     --card-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.366 0.196 299.23);
+    --primary-foreground: oklch(0.984 0.002 325.589);
     --secondary: oklch(0.97 0 0);
     --secondary-foreground: oklch(0.205 0 0);
     --muted: oklch(0.97 0 0);
@@ -26,16 +33,20 @@
     --destructive-foreground: oklch(0.985 0 0);
     --border: oklch(0.922 0 0);
     --input: oklch(0.922 0 0);
-    --ring: oklch(0.205 0 0);
+    --ring: oklch(0.366 0.196 299.23);
     --sidebar: oklch(0.985 0 0);
     --sidebar-foreground: oklch(0.145 0 0);
     --sidebar-accent: oklch(0.97 0 0);
     --sidebar-accent-foreground: oklch(0.205 0 0);
+    --sidebar-primary: oklch(0.366 0.196 299.23);
+    --sidebar-primary-foreground: oklch(0.984 0.002 325.589);
     --sidebar-border: oklch(0.922 0 0);
     --positive: oklch(0.977 0.019 155.487);
     --positive-foreground: oklch(0.623 0.169 149.178);
     --warning: oklch(0.976 0.016 73.092);
     --warning-foreground: oklch(0.645 0.192 41.712);
+    --info: oklch(0.932 0.032 255.585);
+    --info-foreground: oklch(0.488 0.19 259.13);
     --radius: 0.625rem;
     --radius-sm: calc(var(--radius) - 4px);
     --radius-md: calc(var(--radius) - 2px);
@@ -48,8 +59,8 @@
       --foreground: oklch(0.985 0 0);
       --card: oklch(0.205 0 0);
       --card-foreground: oklch(0.985 0 0);
-      --primary: oklch(0.922 0 0);
-      --primary-foreground: oklch(0.205 0 0);
+      --primary: oklch(0.506 0.159 306.978);
+      --primary-foreground: oklch(0.985 0 0);
       --secondary: oklch(0.269 0 0);
       --secondary-foreground: oklch(0.985 0 0);
       --muted: oklch(0.269 0 0);
@@ -60,14 +71,18 @@
       --destructive-foreground: oklch(0.145 0 0);
       --border: oklch(1 0 0 / 10%);
       --input: oklch(1 0 0 / 15%);
-      --ring: oklch(0.922 0 0);
+      --ring: oklch(0.506 0.159 306.978);
       --sidebar: oklch(0.205 0 0);
       --sidebar-foreground: oklch(0.985 0 0);
       --sidebar-accent: oklch(0.269 0 0);
       --sidebar-accent-foreground: oklch(0.985 0 0);
+      --sidebar-primary: oklch(0.506 0.159 306.978);
+      --sidebar-primary-foreground: oklch(0.985 0 0);
       --sidebar-border: oklch(1 0 0 / 10%);
       --positive: oklch(0.337 0.062 151.532);
       --positive-foreground: oklch(0.859 0.14 152.167);
+      --info: oklch(0.279 0.066 254.746);
+      --info-foreground: oklch(0.707 0.165 254.624);
       --warning: oklch(0.318 0.035 71.647);
       --warning-foreground: oklch(0.848 0.117 72.544);
     }
@@ -95,7 +110,12 @@
     height: 100vh;
   }
   .sidebar-header { display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0.5rem 1.25rem; }
-  .logo-mark { width: 1.75rem; height: 1.75rem; border-radius: var(--radius-md); background: var(--primary); color: var(--primary-foreground); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .logo-mark {
+    width: 1.75rem; height: 1.75rem; border-radius: var(--radius-md);
+    background: linear-gradient(135deg, var(--primary) 0%, var(--info-foreground) 55%, var(--warning-foreground) 100%);
+    color: var(--primary-foreground);
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
   .logo-mark svg { width: 1rem; height: 1rem; }
   .logo-text { font-weight: 600; font-size: 0.95rem; line-height: 1.1; }
   .logo-sub { display: block; font-size: 0.7rem; color: var(--muted-foreground); font-weight: 400; }
@@ -108,8 +128,8 @@
   }
   .nav-item svg { width: 1rem; height: 1rem; flex-shrink: 0; color: var(--muted-foreground); }
   .nav-item:hover { background: var(--sidebar-accent); }
-  .nav-item.active { background: var(--sidebar-accent); color: var(--sidebar-accent-foreground); }
-  .nav-item.active svg { color: var(--sidebar-accent-foreground); }
+  .nav-item.active { background: color-mix(in oklch, var(--sidebar-primary), transparent 88%); color: var(--sidebar-primary); }
+  .nav-item.active svg { color: var(--sidebar-primary); }
   .sidebar-footer { margin-top: auto; padding: 0.75rem 0.6rem 0.25rem; font-size: 0.7rem; color: var(--muted-foreground); border-top: 1px solid var(--sidebar-border); }
   .content { flex: 1; min-width: 0; padding: 2rem 2.5rem; max-width: 56rem; }
   .page-header { margin-bottom: 1.25rem; }
@@ -148,9 +168,9 @@
     display: inline-block; font-size: 0.7rem; font-weight: 600;
     padding: 0.15rem 0.55rem; border-radius: 999px; letter-spacing: 0.02em;
   }
-  .badge-verified { background: var(--positive); color: var(--positive-foreground); }
+  .badge-verified { background: var(--info); color: var(--info-foreground); }
   .badge-unverified { background: var(--destructive); color: var(--destructive-foreground); }
-  .badge-informational { background: var(--muted); color: var(--muted-foreground); }
+  .badge-informational { background: var(--warning); color: var(--warning-foreground); }
   .attestation-block { margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px solid var(--border); }
   .attestation-block:first-of-type { border-top: none; }
   .checks { list-style: none; padding: 0; margin: 0.25rem 0 0; font-size: 0.82rem; }
@@ -176,7 +196,7 @@
   }
   .profile-form input:focus { outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring), transparent 75%); }
   .profile-form button { justify-self: start; margin-top: 0.25rem; }
-  .announced-note { color: var(--positive-foreground); font-weight: 600; font-size: 0.85rem; }
+  .announced-note { color: var(--primary); font-weight: 600; font-size: 0.85rem; }
   .page { max-width: 42rem; }
   [hidden] { display: none !important; }
 </style>
