@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Nostr Catalogue</title>
 <style>
   /* Structure (cards/radius/layout) mirrors shadcn/ui's "classic" theme as
@@ -135,7 +136,11 @@
   .page-header { margin-bottom: 1.25rem; }
   .page-header h1 { font-size: 1.15rem; font-weight: 600; margin: 0 0 0.35rem; }
   .page-desc { font-size: 0.85rem; color: var(--muted-foreground); margin: 0; max-width: 42rem; line-height: 1.5; }
-  .card { background: var(--card); color: var(--card-foreground); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 1.25rem 1.5rem; margin-top: 0.9rem; }
+  .card {
+    background: var(--card); color: var(--card-foreground); border: 1px solid var(--border);
+    border-radius: var(--radius-xl); padding: 1.25rem 1.5rem; margin-top: 0.9rem;
+    overflow-x: auto; /* lets a wide table scroll within the card on narrow viewports instead of the whole page overflowing */
+  }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
   th { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted-foreground); font-weight: 600; }
@@ -175,7 +180,7 @@
   }
   .trust-history .trust-card { opacity: 0.85; }
   .trust-history .trust-card:first-child { margin-top: 0; }
-  .trust-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+  .trust-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 0.4rem 1rem; }
   .trust-head h3 { margin: 0; font-size: 0.95rem; font-weight: 600; }
   .trust-meta { font-size: 0.78rem; color: var(--muted-foreground); }
   .badge {
@@ -213,6 +218,32 @@
   .announced-note { color: var(--primary); font-weight: 600; font-size: 0.85rem; }
   .page { max-width: 42rem; }
   [hidden] { display: none !important; }
+
+  /* Below this width the fixed 15rem sidebar would eat most of a phone
+     screen, so it becomes a horizontally-scrollable top tab bar instead -
+     no JS toggle/overlay state needed, and every nav item stays reachable
+     with a swipe even on the narrowest phones. */
+  @media (max-width: 720px) {
+    .layout { flex-direction: column; }
+    .sidebar {
+      width: 100%; height: auto; position: static;
+      flex-direction: row; align-items: center; gap: 0.5rem;
+      padding: 0.6rem 0.75rem;
+      border-right: none; border-bottom: 1px solid var(--sidebar-border);
+    }
+    .sidebar-header { padding: 0; flex-shrink: 0; }
+    .logo-sub { display: none; }
+    .sidebar-nav {
+      flex: 1; min-width: 0; flex-direction: row; gap: 0.25rem;
+      overflow-x: auto; -webkit-overflow-scrolling: touch;
+    }
+    .nav-item { width: auto; flex-shrink: 0; white-space: nowrap; padding: 0.45rem 0.6rem; }
+    .sidebar-footer { display: none; }
+    .content { padding: 1.25rem 1rem; max-width: 100%; }
+    .page, .page-desc { max-width: 100%; }
+    .card { padding: 1rem; }
+    .trust-history { margin-left: 0.6rem; padding-left: 0.6rem; }
+  }
 </style>
 </head>
 <body>
