@@ -1283,6 +1283,57 @@ func TestTrustEntriesMarksUnverifiedRepository(t *testing.T) {
 	}
 }
 
+// TestTrustEntriesOrdersRevisionsNewestFirstWithinAppAndPublisher is the
+// contract the admin page's fold/expand UI relies on: it treats a
+// (app_id, publisher_hex) group's first TrustEntries() entry as "current"
+// and folds the rest under a history toggle, using CreatedAt rather than
+// parsing Version itself.
+func TestTrustEntriesOrdersRevisionsNewestFirstWithinAppAndPublisher(t *testing.T) {
+	publisherKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	publisher, _ := nostr.GetPublicKey(publisherKey)
+	policy, err := trust.NewExplicitPublishers([]string{publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(policy)
+	verify := func(_ context.Context, declaration protocol.AppDeclaration) (map[string]any, error) {
+		return map[string]any{"id": declaration.AppID, "version": declaration.Version}, nil
+	}
+	// Deliberately ingested out of chronological order (v2, then v1) so a
+	// pass would be suspicious if TrustEntries() happened to just reflect
+	// ingestion order rather than actually sorting by CreatedAt.
+	v2 := nostr.Event{
+		PubKey: publisher, CreatedAt: 2, Kind: 30078,
+		Tags: nostr.Tags{
+			{"d", "hello_nostr"}, {"platform", "yunohost"},
+			{"repo", "https://github.com/example/app_ynh"}, {"version", "2.0.0~ynh1"},
+			{"commit", strings.Repeat("d", 40)}, {"manifest", "sha256:" + strings.Repeat("2", 64)}, {"content", "sha256:" + strings.Repeat("3", 64)},
+		},
+		Content: "{}",
+	}
+	if err := v2.Sign(publisherKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IngestVerified(context.Background(), v2, verify); err != nil {
+		t.Fatal(err)
+	}
+	v1 := signedEventWith(t, publisherKey, "hello_nostr", "https://github.com/example/app_ynh", "1.0.0~ynh1", 1)
+	if err := store.IngestVerified(context.Background(), v1, verify); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := store.TrustEntries()
+	if len(entries) != 2 {
+		t.Fatalf("expected both revisions retained, got: %+v", entries)
+	}
+	if entries[0].Version != "2.0.0~ynh1" || entries[0].CreatedAt != 2 {
+		t.Fatalf("expected the newest revision (v2) first, got: %+v", entries[0])
+	}
+	if entries[1].Version != "1.0.0~ynh1" || entries[1].CreatedAt != 1 {
+		t.Fatalf("expected the older revision (v1) second, got: %+v", entries[1])
+	}
+}
+
 func signedAttestation(t *testing.T, privateKey, appID, repositoryURL, commit, manifestHash, contentHash string) nostr.Event {
 	return signedAttestationAt(t, privateKey, appID, repositoryURL, commit, manifestHash, contentHash, "pass", 1)
 }
