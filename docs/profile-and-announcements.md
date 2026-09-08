@@ -36,8 +36,21 @@ Content is the standard JSON object:
 ```
 
 All fields are optional; empty fields are omitted rather than sent as empty
-strings. `internal/publisher.BuildProfile` builds and signs this event;
-`nostr-ynh profile` publishes it (see below).
+strings. `internal/publisher.BuildProfile` builds and signs this event.
+
+```bash
+nostr-ynh profile \
+  --name "Example Publisher" --about "Publishes YunoHost packages" \
+  --picture https://example.org/icon.png --nip05 publisher@example.org \
+  --private-key-file publisher.key \
+  --relays wss://relay.example
+```
+
+This is a one-off setup step (and again whenever the profile changes), not
+part of the regular release flow - unlike `publish --announce` below, it has
+no place in a per-release CI workflow. `--dry-run` builds and signs the
+event, printing its JSON and `nprofile`, without connecting to a relay, the
+same pattern `nostr-ynh publish --dry-run` uses.
 
 ## Announcement notes (kind 1)
 
