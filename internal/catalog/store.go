@@ -437,6 +437,12 @@ type TrustEntry struct {
 	PublisherHex string `json:"publisher_hex"`
 	Version      string `json:"version"`
 	Commit       string `json:"commit"`
+	// CreatedAt is the declaration event's own timestamp (unix seconds),
+	// exposed so a UI can group a publisher/app pair's retained revisions
+	// and fold every one but the newest under a "history" toggle, without
+	// needing to parse/compare Version strings itself - see the sort order
+	// note on TrustEntries below.
+	CreatedAt int64 `json:"created_at"`
 	// RepositoryVerified reports whether this server has independently
 	// fetched the declared repository at Commit and confirmed the manifest
 	// and content hashes match (IngestVerifiedPackage) - false for a
@@ -491,6 +497,7 @@ func (s *Store) TrustEntries() []TrustEntry {
 				PublisherHex:       r.Declaration.Publisher,
 				Version:            r.Declaration.Version,
 				Commit:             r.Declaration.Commit,
+				CreatedAt:          int64(r.CreatedAt),
 				RepositoryVerified: r.Manifest != nil,
 				Status:             ComputeAttestationStatus(r.Manifest != nil, attestations),
 				Attestations:       securityEntries,
@@ -511,7 +518,11 @@ func (s *Store) TrustEntries() []TrustEntry {
 		if entries[i].Publisher != entries[j].Publisher {
 			return entries[i].Publisher < entries[j].Publisher
 		}
-		return entries[i].Commit < entries[j].Commit
+		// Newest first within a publisher/app pair - matches this
+		// function's own doc comment above, and lets a UI treat the first
+		// entry per (app_id, publisher_hex) group as "current" and fold
+		// the rest under a history toggle without parsing Version itself.
+		return entries[i].CreatedAt > entries[j].CreatedAt
 	})
 	return entries
 }

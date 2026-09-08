@@ -159,8 +159,22 @@
   .history-row td { background: var(--muted); padding: 0.5rem 1rem; }
   .history-row table { margin-top: 0; }
   .history-row th, .history-row td { padding: 0.25rem 0.5rem; }
+  .trust-group { margin-top: 0.75rem; }
+  .trust-group:first-child { margin-top: 0; }
   .trust-card { border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 0.9rem 1.1rem; margin-top: 0.75rem; }
-  .trust-card:first-child { margin-top: 0; }
+  .trust-group > .trust-card { margin-top: 0; }
+  .history-toggle {
+    display: block; width: 100%; text-align: left; margin: 0.4rem 0 0;
+    background: none; border: none; color: var(--muted-foreground);
+    font-size: 0.78rem; font-weight: 500; padding: 0.3rem 0.2rem;
+  }
+  .history-toggle:hover { color: var(--foreground); }
+  .trust-history {
+    margin-left: 0.9rem; padding-left: 0.9rem;
+    border-left: 2px solid var(--border);
+  }
+  .trust-history .trust-card { opacity: 0.85; }
+  .trust-history .trust-card:first-child { margin-top: 0; }
   .trust-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
   .trust-head h3 { margin: 0; font-size: 0.95rem; font-weight: 600; }
   .trust-meta { font-size: 0.78rem; color: var(--muted-foreground); }
@@ -434,6 +448,43 @@ async function reverifyEntry(entry, button, resultBox) {
   }
 }
 
+// buildTrustGroup renders one (app_id, publisher) pair's retained
+// revisions - possibly several, when a newer, not-yet-installable revision
+// sits behind an older one that's still selected under a require policy
+// (see "Upgrade gating" in docs/attestations.md). Only the newest is shown
+// by default; older revisions fold behind a toggle rather than each
+// getting their own always-visible card, which is what made the trust
+// dashboard read as a long, repetitive list once a publisher had more than
+// one retained revision. /admin/trust already returns entries newest-first
+// within a group (catalog.Store.TrustEntries sorts by CreatedAt), so
+// revisions[0] is always "current" here - no Version parsing needed.
+function buildTrustGroup(revisions) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "trust-group";
+  wrapper.appendChild(buildTrustCard(revisions[0]));
+  const older = revisions.slice(1);
+  if (older.length) {
+    const label = (hidden) => `${hidden ? "▸" : "▾"} ${older.length} older revision${older.length > 1 ? "s" : ""}`;
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "history-toggle";
+    toggle.textContent = label(true);
+    const historyBox = document.createElement("div");
+    historyBox.className = "trust-history";
+    historyBox.hidden = true;
+    for (const revision of older) {
+      historyBox.appendChild(buildTrustCard(revision));
+    }
+    toggle.addEventListener("click", () => {
+      historyBox.hidden = !historyBox.hidden;
+      toggle.textContent = label(historyBox.hidden);
+    });
+    wrapper.appendChild(toggle);
+    wrapper.appendChild(historyBox);
+  }
+  return wrapper;
+}
+
 async function loadTrust() {
   const response = await fetch("/admin/trust");
   const entries = await response.json();
@@ -446,8 +497,18 @@ async function loadTrust() {
     container.appendChild(empty);
     return;
   }
-  for (const entry of entries) {
-    container.appendChild(buildTrustCard(entry));
+  // Entries are already grouped and ordered by /admin/trust (app_id, then
+  // publisher, then newest-first) - a group's revisions are always
+  // contiguous, so a single linear pass finds each group's boundary
+  // without needing a Map.
+  let i = 0;
+  while (i < entries.length) {
+    let j = i + 1;
+    while (j < entries.length && entries[j].app_id === entries[i].app_id && entries[j].publisher_hex === entries[i].publisher_hex) {
+      j++;
+    }
+    container.appendChild(buildTrustGroup(entries.slice(i, j)));
+    i = j;
   }
 }
 
