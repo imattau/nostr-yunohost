@@ -1,0 +1,32 @@
+#!/bin/bash
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+ynh_script_progression "Stopping the service"
+
+systemctl stop $app.service 2>&1 || true
+
+ynh_script_progression "Upgrading nostr-catalogd and nostr-ynh"
+
+ynh_setup_source --dest_dir="$install_dir" --keep="publisher.key catalogue-cache.json installed-apps.json attestation-ledger.json announcement-ledger.json publisher-profile.json"
+chmod +x "$install_dir/nostr-catalogd" "$install_dir/nostr-ynh"
+chown -R $app:$app "$install_dir"
+
+ynh_script_progression "Updating configuration"
+
+port_catalog=$(ynh_app_setting_get --app=$app --key=port_catalog)
+port_admin=$(ynh_app_setting_get --app=$app --key=port_admin)
+
+ynh_add_config --template="../conf/env" --destination="$nostr_catalogd_env_file"
+chmod 640 "$nostr_catalogd_env_file"
+chown root:$app "$nostr_catalogd_env_file"
+
+ynh_add_config --template="../conf/nostr-catalogd.service" --destination="/etc/systemd/system/$app.service"
+systemctl daemon-reload
+
+ynh_script_progression "Restarting the service"
+
+ynh_systemd_action --service_name=$app --action="restart" --line_match="listening on"
+
+ynh_script_progression "Upgrade complete" --last

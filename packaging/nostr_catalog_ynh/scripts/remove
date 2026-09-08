@@ -1,0 +1,30 @@
+#!/bin/bash
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+ynh_script_progression "Stopping and removing the service"
+
+if ynh_exec_warn_less yunohost service status $app >/dev/null; then
+    yunohost service remove $app
+fi
+systemctl stop $app.service 2>&1 || true
+systemctl disable $app.service 2>&1 || true
+ynh_secure_remove --file="/etc/systemd/system/$app.service"
+systemctl daemon-reload
+
+ynh_script_progression "Removing nginx configuration"
+
+ynh_remove_nginx_config
+
+ynh_script_progression "Removing configuration files"
+
+# The publisher key (install_dir/publisher.key) is removed along with the
+# rest of install_dir by the packaging v2 install_dir resource - deliberate,
+# since a removed app has no further use for it. An administrator who wants
+# to keep publishing under the same identity after uninstalling should copy
+# it out first; this is the same tradeoff any local-key setup has.
+ynh_secure_remove --file="$nostr_catalogd_env_file"
+rmdir --ignore-fail-on-non-empty /etc/nostr_catalog 2>/dev/null || true
+
+ynh_script_progression "Removal complete" --last
